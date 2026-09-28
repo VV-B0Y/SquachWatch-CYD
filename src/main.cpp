@@ -19,6 +19,9 @@
 // The [frame] line's "rows" is whoever actually wrote them.
 #define SQW_PUSH_ROWS() CrowBlit::lastRows()
 #else
+#if defined(CYD35C)
+#include "gt911_touch.h"
+#endif
 #define SQW_PUSH_ROWS() FramePush::lastRows()
 #endif
 #include <XPT2046_Touchscreen.h>
@@ -350,7 +353,7 @@ static void drawCrashCard(TFT_eSPI& t) {
     #define TOUCH_SHARES_DISPLAY_BUS 1
 #endif
 
-#if defined(CYD35)
+#if defined(CYD35) && !defined(CYD35C)
     #define TOUCH_SCK  TFT_SCLK
     #define TOUCH_MOSI TFT_MOSI
     #define TOUCH_MISO TFT_MISO
@@ -377,6 +380,7 @@ static void drawCrashCard(TFT_eSPI& t) {
 #define CAP_SDA    33
 #define CAP_SCL    32
 #define CAP_RST    25
+#define CAP_INT    21
 // Backlight brightness (Settings menu): all three boards' backlight
 // pins are driven at boot regardless of which one is actually wired
 // (see the digitalWrite(HIGH) comment in setup() — same reasoning
@@ -646,6 +650,10 @@ static bool rawReadResistive(int16_t& a, int16_t& b);
 // calibration is needed or wanted.
 static uint16_t CAP_NX_MIN = CROW_CAP_NX_MIN, CAP_NX_MAX = CROW_CAP_NX_MAX;
 static uint16_t CAP_NY_MIN = CROW_CAP_NY_MIN, CAP_NY_MAX = CROW_CAP_NY_MAX;
+#elif defined(CYD35C)
+// The GT911 reports panel pixels directly (320x480 native portrait)
+static uint16_t CAP_NX_MIN = 0, CAP_NX_MAX = 320;
+static uint16_t CAP_NY_MIN = 0, CAP_NY_MAX = 480;
 #else
 static uint16_t CAP_NX_MIN = 32,  CAP_NX_MAX = 166;
 static uint16_t CAP_NY_MIN = 10,  CAP_NY_MAX = 308;
@@ -668,7 +676,7 @@ static uint16_t RAW_Y_MIN = 200, RAW_Y_MAX = 3800;
 static const int16_t CAP_TOUCH_MIN_SPREAD = 50;
 static const int16_t RESISTIVE_MIN_SPREAD = 800;
 
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
 // TFT_eSPI::setTouch()'s own calibration format, as older firmware saved it
 // on AWOK and the 3.5": [0] and [2] are the raw readings at the low edge of
 // each axis, [1] and [3] the SPANS from there (calibrateTouch() subtracts
@@ -696,7 +704,7 @@ static TouchFit::Fit s_touchFit = TouchFit::fromRanges(RAW_X_MIN, RAW_X_MAX, RAW
 enum class CalSource : uint8_t { BUILT_IN, OLD_SAVED, SAVED };
 static CalSource s_calSource = CalSource::BUILT_IN;
 
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
 // ---- Calibrations older firmware saved through TFT_eSPI ----
 // AWOK and the 3.5" used to hand touch to TFT_eSPI's calibrateTouch() /
 // getTouch(). Its blob is only read now, once, so an owner who SKIPs the
@@ -802,7 +810,10 @@ static bool rawReadCap(int16_t& a, int16_t& b) {
 }
 
 static bool rawReadResistive(int16_t& a, int16_t& b) {
-#if defined(TOUCH_SHARES_DISPLAY_BUS) || defined(CYD35)
+#if defined(CYD35C)
+    (void)a; (void)b;
+    return false;
+#elif defined(TOUCH_SHARES_DISPLAY_BUS) || defined(CYD35)
     // None of these boards' `touch` (XPT2046_Touchscreen) object is ever
     // begin()'d -- a second SPI driver on the display's own bus produced
     // garbage -- so this goes through TFT_eSPI's raw-touch accessors.
@@ -823,7 +834,7 @@ static bool rawReadResistive(int16_t& a, int16_t& b) {
 #endif
 }
 
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
 // AWOK and the 3.5" used TFT_eSPI's getTouch(), whose filtering is part of
 // how their touch feels. It is private to the library (validTouch()), so it
 // is repeated here step for step: wait for the pressure to stop rising,
@@ -856,7 +867,7 @@ static bool rawReadFiltered(int16_t& a, int16_t& b) {
 // The one reader pollTouch(), the calibration and the diagnostics screen all
 // use, so what the calibration measures is exactly what touch then reads.
 static bool readTouchRaw(int16_t& a, int16_t& b) {
-#if defined(CROWPANEL7)
+#if defined(CROWPANEL7) || defined(CYD35C)
     // The GT911 already reports panel pixels; TouchFit divides by the scale,
     // so nothing else differs.
     uint16_t x, y;
@@ -865,7 +876,7 @@ static bool readTouchRaw(int16_t& a, int16_t& b) {
     return true;
 #else
     if (usingCapTouch) return rawReadCap(a, b);
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
     return rawReadFiltered(a, b);
 #else
     return rawReadResistive(a, b);
@@ -983,7 +994,12 @@ static void initTouchFit() {
     }
 
     s_calSource = CalSource::BUILT_IN;
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if defined(CYD35C)
+    // GT911 reports panel pixels directly in native frame (320x480 portrait).
+    s_touchFit = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, (int16_t)w0, (int16_t)h0 };
+    return;
+#endif
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
     TouchFit::Fit old;
     if (fitFromTftEspiBlobs(old)) {
         s_touchFit = old;
@@ -2821,7 +2837,7 @@ void setup() {
 // ... and not on the CrowPanel 7, where GPIO21 is the panel's BLUE-0 data
 // line. Driving it high before the panel driver claims it is a stripe down the
 // picture at best.
-#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(SQW_S3) && !defined(CROWPANEL7)
+#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(SQW_S3) && !defined(CROWPANEL7) && !defined(CYD35)
     pinMode(21, OUTPUT); digitalWrite(21, HIGH);
 #endif
 #if defined(SQW_S3)
@@ -2835,7 +2851,7 @@ void setup() {
     // RGB data line.
 #else
     pinMode(27, OUTPUT); digitalWrite(27, HIGH);
-#if !defined(FREENOVE32)   // not a known-spare pin on the Freenove; its backlight is 27 alone
+#if !defined(FREENOVE32) && !defined(CYD35)   // not a known-spare pin on the Freenove; its backlight is 27 alone; on CYD35 pin 32 is touch SCL
     pinMode(32, OUTPUT); digitalWrite(32, HIGH);  // AWOK's real BL pin; unused GPIO on the other two boards
 #endif
 #endif
@@ -2914,13 +2930,13 @@ void setup() {
     ledcSetup(BL_CH_ORIG, 5000, 8);
     ledcAttachPin(BL_PIN_S3, BL_CH_ORIG);
 #else
-#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R)
+#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(CYD35)
     ledcSetup(BL_CH_ORIG, 5000, 8);
     ledcAttachPin(BL_PIN_ORIG, BL_CH_ORIG);
 #endif
     ledcSetup(BL_CH_CAP, 5000, 8);
     ledcAttachPin(BL_PIN_CAP, BL_CH_CAP);
-#if !defined(FREENOVE32)   // see the pinMode(32) above; a channel with no pin is harmless to write
+#if !defined(FREENOVE32) && !defined(CYD35)   // see the pinMode(32) above; a channel with no pin is harmless to write
     ledcSetup(BL_CH_AWOK, 5000, 8);
     ledcAttachPin(BL_PIN_AWOK, BL_CH_AWOK);
 #endif
@@ -3045,7 +3061,12 @@ void setup() {
     // and can go anywhere after the display is up.
     FramePush::begin();
 
-#if defined(CYD35)
+#if defined(CYD35C)
+    // ESP32-3248S035C: GT911 capacitive touch on I2C (SDA=33, SCL=32, RST=25, INT=21).
+    usingCapTouch = Gt911::begin(PIN_I2C_SDA, PIN_I2C_SCL, PIN_TOUCH_RST, PIN_TOUCH_INT);
+    Serial.println(usingCapTouch ? "ESP32-3248S035C -- GT911 capacitive touch answered."
+                                 : "ESP32-3248S035C -- GT911 did not answer; no touch.");
+#elif defined(CYD35)
     // The standalone XPT2046_Touchscreen library (own SPIClass, own
     // IRQ pin) produced constant garbage reads and a free-running IRQ
     // here -- not a wrong-pin problem, a second SPI master fighting
@@ -3142,9 +3163,8 @@ void setup() {
         uint32_t windowStart = millis();
         while (millis() - windowStart < 1200) {
             int16_t a, b;
-#if defined(CROWPANEL7)
-            // The GT911 is neither of the two below; the two-way dispatch
-            // polled a capacitive controller that is not on this bus.
+#if defined(CROWPANEL7) || defined(CYD35C)
+            // The GT911 is read via readTouchRaw directly
             bool down = readTouchRaw(a, b);
 #else
             bool down = usingCapTouch ? rawReadCap(a, b) : rawReadResistive(a, b);
@@ -3153,7 +3173,7 @@ void setup() {
                 if (holdStart == 0) holdStart = millis();
                 else if (millis() - holdStart > 800) {
                     TouchCal::reset();
-#if defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)
+#if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
                     // TouchCal::reset() clears the Fit and the 2.8"-style
                     // calibration; these boards' old TFT_eSPI blobs live in
                     // a namespace of their own, and SKIP would bring them
@@ -3191,13 +3211,13 @@ void setup() {
     // injected against the compiled-in ranges -- a calibration screen would
     // just sit there waiting for a finger.
     initTouchFit();
-#if defined(ESP32) && !defined(CROWPANEL7)
+#if defined(ESP32) && !defined(CROWPANEL7) && !defined(CYD35C)
     if (s_calSource != CalSource::SAVED) {
         Serial.println("Touch: no five-target calibration yet -- running it now.");
         runTouchCalibration();
     }
 #endif
-#if defined(CROWPANEL7)
+#if defined(CROWPANEL7) || defined(CYD35C)
     // Never on first boot here. The GT911 reports panel pixels, so the
     // compiled-in fit is already the identity and there is nothing to
     // calibrate -- making someone tap five targets would only replace an
@@ -6240,10 +6260,12 @@ void loop() {
             info.usingCapTouch = usingCapTouch;
 #if defined(CROWPANEL7)
             info.boardName = "CrowPanel 7";
+#elif defined(CYD35C)
+            info.boardName = "ESP32-3248S035C";
 #elif defined(TOUCH_ON_DISPLAY_BUS)
             info.boardName = "AWOK";
 #elif defined(CYD35)
-            info.boardName = "cyd35 BETA";
+            info.boardName = "cyd35";
 #else
             info.boardName = "cyd";
 #endif

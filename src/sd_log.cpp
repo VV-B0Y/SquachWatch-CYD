@@ -67,55 +67,11 @@ bool SdLog::begin() {
         mounted = SD_MMC.begin("/sd", true, false, SDMMC_FREQ_DEFAULT, SD_MAX_FILES);
         if (mounted) Serial.println("[sd] 4-bit did not start; mounted 1-bit");
     }
-    if (!mounted) {
-#elif defined(CYD35)
-    // (The RL Phantom used to land here too, and its SD card never worked as
-    // a result: the card is on 18/19/23, and the display's SPI engine never
-    // clocked those pins. Its display now runs on HSPI -- see its user setup
-    // -- so it takes the original board's branch below with a bus of its own.)
-    // The RL Phantom landed here for the same reason cyd35 does, and it cost a
-    // tester an evening: its resistive touch chip sits on the DISPLAY's bus, so
-    // the extra pins this attaches corrupt MISO for every touch read afterwards.
-    // The symptom is precise and was reported exactly as described below --
-    // the 4-corner calibration works (it runs BEFORE engine.init() brings SD up)
-    // and touch is dead on the very next screen. Not a bad calibration blob: a
-    // corrupted bus underneath a perfectly good one.
-    //
-    // SD.begin(csPin) defaults its SPIClass& parameter to the Arduino
-    // *global* `SPI` object -- a separate, never-begun C++ instance
-    // from TFT_eSPI's own internal one, even though both ultimately
-    // target the same VSPI hardware. SDFS::begin() (ESP32 core's
-    // SD.cpp) unconditionally calls that object's own spi.begin() with
-    // NO arguments; for a never-begun SPIClass, SPIClass::begin() falls
-    // back to the compiled-in esp32dev board defaults -- SCK=18,
-    // MISO=19, MOSI=23 -- regardless of this board's real shared-bus
-    // pins (14/13/12 here). Root-caused on real cyd35 hardware: those
-    // extra pins get ADDITIONALLY attached to VSPI's signals via the
-    // GPIO matrix (spiAttachSCK() etc. are additive, not exclusive),
-    // corrupting MISO for every touch read afterward even though the
-    // display's write-only path looked completely fine.
-    //
-    // Passing TFT_eSPI's own already-init()'d SPI instance instead
-    // makes SDFS::begin()'s internal spi.begin() call a genuine no-op
-    // (SPIClass::begin() returns immediately if already begun -- see
-    // its own guard), so nothing extra ever gets attached to the bus.
-    //
-    // AWOK deliberately does NOT get this treatment despite sharing
-    // the same VSPI-bus shape: real hardware regression testing showed
-    // its touch stops responding once SD.begin() runs with the shared
-    // instance passed in (SD.begin() still attempts real transactions
-    // over that peripheral even though `begin()` itself becomes a
-    // no-op, and AWOK's touch chip is apparently more sensitive to
-    // that than cyd35's) -- so it keeps the plain no-args SD.begin()
-    // below, same as before this fix existed.
-    if (!SD.begin(SD_CS_PIN, tft.getSPIinstance(), 4000000, "/sd", SD_MAX_FILES)) {
 #elif defined(AWOK)
     if (!SD.begin(SD_CS_PIN, SPI, 4000000, "/sd", SD_MAX_FILES)) {
 #else
-    // Original board only: a genuinely separate, dedicated SD bus (not
-    // shared with the display), so it does need its own explicit begin()
-    // -- SD.begin()'s internal default-pin fallback happens to match
-    // this board's real wiring too, but stay explicit for clarity.
+    // Original CYD and 3.5" boards (CYD35 / CYD35C): dedicated SD bus on
+    // GPIO 18 (SCK), 19 (MISO), 23 (MOSI) with CS=5.
     SPI.begin(18, 19, 23, SD_CS_PIN);  // SCK, MISO, MOSI, CS
     if (!SD.begin(SD_CS_PIN, SPI, 4000000, "/sd", SD_MAX_FILES)) {
 #endif

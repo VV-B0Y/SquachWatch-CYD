@@ -1,14 +1,31 @@
-#if defined(CROWPANEL7)
+#if defined(CROWPANEL7) || defined(CYD35C)
 #include "gt911_touch.h"
+#if defined(CROWPANEL7)
 #include "crowpanel7_board.h"
 #include "crowpanel7_backlight.h"
+#endif
 #include <Arduino.h>
 #include <Wire.h>
+
+#ifndef GT911_ADDR_A
+#define GT911_ADDR_A   0x5D
+#endif
+#ifndef GT911_ADDR_B
+#define GT911_ADDR_B   0x14
+#endif
+#ifndef GT911_REG_PRODUCT_ID
+#define GT911_REG_PRODUCT_ID 0x8140
+#endif
+#ifndef GT911_REG_STATUS
+#define GT911_REG_STATUS     0x814E
+#endif
+#ifndef GT911_REG_POINT1
+#define GT911_REG_POINT1     0x814F
+#endif
 
 namespace Gt911 {
 
 static uint8_t s_addr = 0;
-
 static uint8_t s_diag = 8;   // first few failures only
 
 // The register address goes out big-endian and the read needs a REPEATED
@@ -48,6 +65,7 @@ static bool i2cPresent(uint8_t addr) {
     return Wire.endTransmission() == 0;
 }
 
+#if defined(CROWPANEL7)
 // The controller will not answer until the helper MCU has been told to wake
 // it AND its INT line has been pulsed low. Holding INT low across the release
 // of reset is also what latches its address to 0x5D rather than 0x14, which
@@ -66,6 +84,29 @@ static void wake() {
         delay(100);
     }
 }
+#else
+// Standard hardware reset and address latch for GT911 on directly wired GPIOs (e.g. CYD35C).
+// Holding INT low while releasing RST latches the I2C address to 0x5D.
+static void wakeStandard(int rstPin, int intPin) {
+    if (rstPin >= 0) {
+        pinMode(rstPin, OUTPUT);
+        digitalWrite(rstPin, LOW);
+    }
+    if (intPin >= 0) {
+        pinMode(intPin, OUTPUT);
+        digitalWrite(intPin, LOW);
+    }
+    delay(15);
+    if (rstPin >= 0) {
+        digitalWrite(rstPin, HIGH);
+        delay(10);
+    }
+    if (intPin >= 0) {
+        pinMode(intPin, INPUT);
+        delay(50);
+    }
+}
+#endif
 
 static bool identify() {
     const uint8_t candidates[2] = { GT911_ADDR_A, GT911_ADDR_B };
@@ -81,11 +122,47 @@ static bool identify() {
     return false;
 }
 
-bool begin() {
+bool begin(int sda, int scl, int rst, int irq) {
+#if defined(CROWPANEL7)
+    (void)sda; (void)scl; (void)rst; (void)irq;
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ);
     delay(20);
     CrowBL::begin();
     wake();
+#else
+    if (sda < 0) {
+#ifdef PIN_I2C_SDA
+        sda = PIN_I2C_SDA;
+#else
+        sda = 33;
+#endif
+    }
+    if (scl < 0) {
+#ifdef PIN_I2C_SCL
+        scl = PIN_I2C_SCL;
+#else
+        scl = 32;
+#endif
+    }
+    if (rst < 0) {
+#ifdef PIN_TOUCH_RST
+        rst = PIN_TOUCH_RST;
+#else
+        rst = 25;
+#endif
+    }
+    if (irq < 0) {
+#ifdef PIN_TOUCH_INT
+        irq = PIN_TOUCH_INT;
+#else
+        irq = 21;
+#endif
+    }
+    wakeStandard(rst, irq);
+    Wire.begin(sda, scl, 400000);
+    delay(20);
+#endif
+
     if (!identify()) {
         Serial.println(F("[touch] no GT911 answered on 0x5D or 0x14"));
         return false;
