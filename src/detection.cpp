@@ -1717,9 +1717,13 @@ void DetectionEngine::watchWifi(const uint8_t* bssid, const char* ssid) {
     _watchHitFlag   = false;
     _watchRssiHead = _watchRssiCount = 0;
     _watchRssiLastMs = 0;
+    _sd.logTargetScan(_watchLabel, bssid, 0, 0, "TARGET_WATCH_START");
 }
 
 void DetectionEngine::clearWatch() {
+    if (_watchKind == WatchKind::WIFI && _watchLabel[0]) {
+        _sd.logTargetScan(_watchLabel, _watchMac, 0, 0, "TARGET_WATCH_STOP");
+    }
     _watchKind    = WatchKind::NONE;
     _watchHitFlag = false;
     _watchRssiHead = _watchRssiCount = 0;
@@ -1763,6 +1767,9 @@ void DetectionEngine::recordWatchRssi(int8_t rssi) {
     _watchRssiHist[_watchRssiHead] = rssi;
     _watchRssiHead = (_watchRssiHead + 1) % WATCH_RSSI_CAP;
     if (_watchRssiCount < WATCH_RSSI_CAP) _watchRssiCount++;
+    if (_watchKind == WatchKind::WIFI) {
+        _sd.logTargetScan(_watchLabel, _watchMac, rssi, 0, "WATCH");
+    }
 }
 
 int8_t DetectionEngine::watchRssiAt(uint8_t idx) const {
@@ -1791,9 +1798,13 @@ void DetectionEngine::huntWifi(const uint8_t* bssid, const char* ssid) {
     _huntLabel[sizeof(_huntLabel) - 1] = 0;
     _huntRssiHead = _huntRssiCount = 0;
     _huntRssiLastMs = 0;
+    _sd.logTargetScan(_huntLabel, bssid, 0, 0, "TARGET_HUNT_START");
 }
 
 void DetectionEngine::clearHunt() {
+    if (_huntKind == WatchKind::WIFI && _huntLabel[0]) {
+        _sd.logTargetScan(_huntLabel, _huntMac, 0, 0, "TARGET_HUNT_STOP");
+    }
     _huntKind = WatchKind::NONE;
     _huntRssiHead = _huntRssiCount = 0;
 }
@@ -1817,6 +1828,9 @@ void DetectionEngine::recordHuntRssi(int8_t rssi) {
     _huntRssiHist[_huntRssiHead] = rssi;
     _huntRssiHead = (_huntRssiHead + 1) % WATCH_RSSI_CAP;
     if (_huntRssiCount < WATCH_RSSI_CAP) _huntRssiCount++;
+    if (_huntKind == WatchKind::WIFI) {
+        _sd.logTargetScan(_huntLabel, _huntMac, rssi, 0, "HUNT");
+    }
 }
 
 int8_t DetectionEngine::huntRssiAt(uint8_t idx) const {

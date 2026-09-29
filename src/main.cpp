@@ -797,6 +797,14 @@ static TouchPoint pollTouch() {
         if (tp.y < 0) tp.y = 0; else if (tp.y >= h) tp.y = h - 1;
     }
     tp.valid = sane;
+#if defined(CYD35C)
+    static uint32_t s_lastTouchLog = 0;
+    if (tp.valid && (millis() - s_lastTouchLog > 120)) {
+        s_lastTouchLog = millis();
+        Serial.printf("[touch] raw=(%d, %d) -> screen=(%d, %d) [screen: %dx%d, rot: %u]\n",
+                      a, b, tp.x, tp.y, w, h, screenRotation);
+    }
+#endif
     return tp;
 }
 
@@ -985,6 +993,13 @@ static void initTouchFit() {
     const int w0 = portrait ? tft.width() : tft.height();
     const int h0 = portrait ? tft.height() : tft.width();
 
+#if defined(CYD35C)
+    s_calSource = CalSource::BUILT_IN;
+    // GT911 reports panel pixels directly in native frame (320x480 portrait).
+    s_touchFit = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, (int16_t)w0, (int16_t)h0 };
+    return;
+#endif
+
     TouchFit::Fit saved;
     if (TouchCal::loadFit(saved) && saved.w0 == w0 && saved.h0 == h0) {
         s_touchFit = saved;
@@ -994,11 +1009,6 @@ static void initTouchFit() {
     }
 
     s_calSource = CalSource::BUILT_IN;
-#if defined(CYD35C)
-    // GT911 reports panel pixels directly in native frame (320x480 portrait).
-    s_touchFit = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, (int16_t)w0, (int16_t)h0 };
-    return;
-#endif
 #if (defined(TOUCH_ON_DISPLAY_BUS) || defined(CYD35)) && !defined(CYD35C)
     TouchFit::Fit old;
     if (fitFromTftEspiBlobs(old)) {
@@ -3467,14 +3477,21 @@ static inline void drawTwoBand(F&& draw) {
 #if defined(CYD35)
     if (frameBufferOk) {
         const int halfH = tft.height() / 2;
+
         DrawBand::set(0, halfH);
+        frame.resetViewport();
+        frame.fillRect(0, 0, tft.width(), halfH, Theme::BG);
         frame.setViewport(0, 0, tft.width(), tft.height(), true);
         draw((TFT_eSPI&)frame, true);
         pushFrame(0, 0);
+
         DrawBand::set(halfH, tft.height());
+        frame.resetViewport();
+        frame.fillRect(0, 0, tft.width(), halfH, Theme::BG);
         frame.setViewport(0, -halfH, tft.width(), tft.height(), true);
         draw((TFT_eSPI&)frame, false);
         pushFrame(0, halfH);
+
         DrawBand::all();
         frame.resetViewport();
         return;
@@ -5537,7 +5554,11 @@ void loop() {
             lastTouch = now;
             // The board redraws only what changed, so it is the same with the
             // frame buffer and without it (given up for a download).
+#if defined(CYD35)
+            uiWifiPassTick(tft, now);
+#else
             drawTwoBand([&](TFT_eSPI& t, bool) { uiWifiPassTick(t, now); });
+#endif
             if (touchJustDown)    uiWifiPassTouch(tp.x, tp.y, now, WifiPassTouch::DOWN);
             else if (tp.valid)    uiWifiPassTouch(tp.x, tp.y, now, WifiPassTouch::MOVE);
             else if (touchJustUp) uiWifiPassTouch(tp.x, tp.y, now, WifiPassTouch::UP);
@@ -5548,17 +5569,29 @@ void loop() {
                 uiWifiPassClear();
                 Theme::showToast(ok ? "SAVED" : "LIST FULL", ok ? "Checked at the next boot" : "Remove one first",
                                  ok ? Theme::CYAN : Theme::AMBER);
+#if defined(CYD35)
+                FramePush::invalidate();
+#endif
                 enterWifiNets();
             } else if (r == WifiPassResult::BACK && s_passForNets) {
                 s_passForNets = false;
                 uiWifiPassClear();
+#if defined(CYD35)
+                FramePush::invalidate();
+#endif
                 enterWifiNets();
             } else if (r == WifiPassResult::OK) {
                 OtaWifi::connect(uiWifiPassSsid(), uiWifiPassText(), true);
                 uiWifiPassClear();
+#if defined(CYD35)
+                FramePush::invalidate();
+#endif
                 enterUpdate();
             } else if (r == WifiPassResult::BACK) {
                 uiWifiPassClear();
+#if defined(CYD35)
+                FramePush::invalidate();
+#endif
                 enterUpdate();
             }
             break;
