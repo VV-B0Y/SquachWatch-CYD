@@ -207,7 +207,7 @@ void SdLog::logEvent(const Detection& d) {
                 ef.println("# Format: Timestamp,Type,RSSI,Rogue_BSSID,Channel,Vendor,SSID,Alert");
             }
             ef.printf("%s,EVILTWIN,%d,%s,%u,EvilTwin,%s,EVIL_PORTAL_ALERT\n",
-                      timeBuf, d.rssi, mac, d.channel, d.name[0] ? d.name : "(hidden)");
+                      timeBuf, d.rssi, mac, d.channel, nameSafe);
             ef.close();
             Serial.printf("[sd] logged evil portal capture to %s\n", evilFile);
         }
@@ -216,11 +216,6 @@ void SdLog::logEvent(const Detection& d) {
 
 void SdLog::logTargetScan(const char* ssid, const uint8_t* bssid, int8_t rssi, uint8_t channel, const char* mode) {
     if (!_ready || !ssid || !ssid[0]) return;
-    static uint32_t s_lastTargetLog = 0;
-    uint32_t now = millis();
-    bool isControl = (mode && (strstr(mode, "START") || strstr(mode, "STOP")));
-    if (!isControl && (now - s_lastTargetLog < 2000)) return;
-    s_lastTargetLog = now;
 
     char safeSsid[32];
     sanitizeFilename(ssid, safeSsid, sizeof(safeSsid));
@@ -240,10 +235,15 @@ void SdLog::logTargetScan(const char* ssid, const uint8_t* bssid, int8_t rssi, u
     } else {
         strncpy(mac, "00:00:00:00:00:00", sizeof(mac));
     }
+    char ssidSafe[36];
+    strncpy(ssidSafe, ssid, sizeof(ssidSafe) - 1);
+    ssidSafe[sizeof(ssidSafe) - 1] = 0;
+    for (char* p = ssidSafe; *p; p++) if (*p == ',') *p = '.';
+
     char timeBuf[32];
     formatTimestamp(timeBuf, sizeof(timeBuf));
     f.printf("%s,%s,%d,%s,%u,%s\n",
-             timeBuf, mode ? mode : "WATCH", rssi, mac, channel, ssid);
+             timeBuf, mode ? mode : "WATCH", rssi, mac, channel, ssidSafe);
     f.close();
     Serial.printf("[sd] logged targeted scan sighting to %s\n", filename);
 }
@@ -271,8 +271,11 @@ void SdLog::wipe() {
             f.close();
         }
         dir.close();
-        for (int i = 0; i < n; i++) CARD.remove(victims[i]);
-        if (n < 32) more = false;
+        int removed = 0;
+        for (int i = 0; i < n; i++) {
+            if (CARD.remove(victims[i])) removed++;
+        }
+        if (n < 32 || removed == 0) more = false;
     }
     _filename[0] = '\0';       // force a fresh openDaily() on the next event
 }

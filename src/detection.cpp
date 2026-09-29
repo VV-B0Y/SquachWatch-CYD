@@ -1747,10 +1747,10 @@ void DetectionEngine::checkWatchBle(const uint8_t* mac, int8_t rssi) {
     _watchHitFlag   = true;
 }
 
-void DetectionEngine::checkWatchWifi(const uint8_t* mac, int8_t rssi) {
+void DetectionEngine::checkWatchWifi(const uint8_t* mac, int8_t rssi, uint8_t channel) {
     if (_watchKind != WatchKind::WIFI) return;
     if (memcmp(mac, _watchMac, 6) != 0) return;
-    recordWatchRssi(rssi);
+    recordWatchRssi(rssi, channel);
     uint32_t now = millis();
     if (now - _watchLastHitMs < WATCH_COOLDOWN_MS) return;
     _watchLastHitMs = now;
@@ -1760,7 +1760,7 @@ void DetectionEngine::checkWatchWifi(const uint8_t* mac, int8_t rssi) {
 // Throttled independently of WATCH_COOLDOWN_MS above -- that gate is
 // about not re-popping the full-screen alert every advertisement,
 // this is about building up a dense-enough trend to actually plot.
-void DetectionEngine::recordWatchRssi(int8_t rssi) {
+void DetectionEngine::recordWatchRssi(int8_t rssi, uint8_t channel) {
     uint32_t now = millis();
     if (now - _watchRssiLastMs < WATCH_RSSI_SAMPLE_MS && _watchRssiCount > 0) return;
     _watchRssiLastMs = now;
@@ -1768,7 +1768,7 @@ void DetectionEngine::recordWatchRssi(int8_t rssi) {
     _watchRssiHead = (_watchRssiHead + 1) % WATCH_RSSI_CAP;
     if (_watchRssiCount < WATCH_RSSI_CAP) _watchRssiCount++;
     if (_watchKind == WatchKind::WIFI) {
-        _sd.logTargetScan(_watchLabel, _watchMac, rssi, 0, "WATCH");
+        _sd.logTargetScan(_watchLabel, _watchMac, rssi, channel, "WATCH");
     }
 }
 
@@ -1815,13 +1815,13 @@ void DetectionEngine::checkHuntBle(const uint8_t* mac, int8_t rssi) {
     recordHuntRssi(rssi);
 }
 
-void DetectionEngine::checkHuntWifi(const uint8_t* mac, int8_t rssi) {
+void DetectionEngine::checkHuntWifi(const uint8_t* mac, int8_t rssi, uint8_t channel) {
     if (_huntKind != WatchKind::WIFI) return;
     if (memcmp(mac, _huntMac, 6) != 0) return;
-    recordHuntRssi(rssi);
+    recordHuntRssi(rssi, channel);
 }
 
-void DetectionEngine::recordHuntRssi(int8_t rssi) {
+void DetectionEngine::recordHuntRssi(int8_t rssi, uint8_t channel) {
     uint32_t now = millis();
     if (now - _huntRssiLastMs < WATCH_RSSI_SAMPLE_MS && _huntRssiCount > 0) return;
     _huntRssiLastMs = now;
@@ -1829,7 +1829,7 @@ void DetectionEngine::recordHuntRssi(int8_t rssi) {
     _huntRssiHead = (_huntRssiHead + 1) % WATCH_RSSI_CAP;
     if (_huntRssiCount < WATCH_RSSI_CAP) _huntRssiCount++;
     if (_huntKind == WatchKind::WIFI) {
-        _sd.logTargetScan(_huntLabel, _huntMac, rssi, 0, "HUNT");
+        _sd.logTargetScan(_huntLabel, _huntMac, rssi, channel, "HUNT");
     }
 }
 
@@ -1904,8 +1904,8 @@ void DetectionEngine::processWiFiQ() {
         // anything) it ends up matching below -- a watched AP's own
         // MAC shows up here as addr2 (probe/data) or addr3/BSSID
         // (beacon), same offsets postWiFi() was already called with.
-        checkWatchWifi(e.mac, e.rssi);
-        checkHuntWifi(e.mac, e.rssi);
+        checkWatchWifi(e.mac, e.rssi, e.channel);
+        checkHuntWifi(e.mac, e.rssi, e.channel);
         // Every captured frame feeds the spectrum-waterfall's channel
         // activity level, whether or not it ends up matching anything
         // below — this is meant to reflect real ambient RF traffic,
