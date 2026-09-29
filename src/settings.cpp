@@ -135,7 +135,6 @@ static uint8_t  s_bleIx        = BLE_LISTEN_DEFAULT;
 static uint8_t  s_idleCpuIx    = IDLE_CPU_DEFAULT;
 static bool     s_wakeOnAlert  = true;
 static uint8_t  s_buzzMode     = 2;    // 0 OFF, 1 HIGH, 2 MED, 3 LOW; MED by default
-static bool     s_steady       = false;
 // The watch's radio duty cycle: on for a few seconds, resting for the rest.
 // 0 ALWAYS, 1 five seconds of thirty, 2 ten of sixty, 3 BLE always on with
 // WiFi five of thirty. Watch only; the CYDs never read it.
@@ -156,13 +155,27 @@ static uint8_t  s_radioDutyIx  = RADIO_DUTY_DEFAULT;
 // stays off until somebody finds the row. Only the CrowPanel 7 shows it.
 static bool     s_buzzer       = false;
 
+// ---- LoRa -----------------------------------------------------------------
+// SURVEY by default: the detector posture, everything in the band. FOCUS is
+// the sysop's, set from the LORA screen or the console.
+static uint8_t  s_loraMode     = 2;
+static uint8_t  s_loraFocus    = 0;
+static uint8_t  s_loraRegion   = 0;   // AUTO
+static uint8_t  s_loraListen   = 3;   // BOTH
+// The online lookups, all four OFF. See Settings::loraLookups() for why the
+// default is the opposite of the update check's.
+static bool     s_loraLookups  = false;
+static bool     s_loraLkCall   = false;
+static bool     s_loraLkOgn    = false;
+static bool     s_loraLkFeed   = false;
+
 // ---- status light --------------------------------------------------------
 static bool    s_lightOn     = true;
 static bool    s_lightAlerts = true;
 static bool    s_lightMsgs   = true;
 static uint8_t s_lightIdle   = 1;    // BREATHE
 static uint8_t s_lightColor  = 0;    // THEME
-static uint8_t s_lightBright = 2;    // of 5
+static uint8_t s_lightBright = 4;    // of 7
 static bool    s_remoteUpdate = false;
 static bool    s_phraseShown  = true;
 static bool    s_updateCheck  = true;
@@ -216,7 +229,6 @@ uint16_t idleAfterSec()     { return IDLE_AFTER[s_idleAfterIx]; }
 uint16_t cpuMhz()           { return s_powerSaver ? CPU_MHZ[s_cpuIx] : 240; }
 bool     wakeOnAlert()      { return s_wakeOnAlert; }
 bool     buzz()             { return s_buzzMode != 0; }
-bool     steadyPower()      { return s_steady; }
 // Only while POWER SAVER is on. Either RADIO DUTY row (the Power screen,
 // or WATCH in settings) picks the mode; neither turns the saver on.
 uint8_t  radioDuty()        { return s_powerSaver ? s_radioDutyIx : 0; }
@@ -270,10 +282,6 @@ void cycleCpuMhz() {
     s_cpuIx = (uint8_t)((s_cpuIx + 1) % CPU_MHZ_N);
     s_prefs.putUChar("pwrCpu", s_cpuIx);
 }
-void toggleSteadyPower() {
-    s_steady = !s_steady;
-    s_prefs.putBool("steady", s_steady);
-}
 
 uint8_t buzzStrength() { return s_buzzMode == 0 ? 0 : (uint8_t)(3 - s_buzzMode); }
 const char* buzzModeName() {
@@ -290,6 +298,58 @@ void toggleWakeOnAlert() {
 }
 bool buzzerOn()     { return s_buzzer; }
 void toggleBuzzer() { s_buzzer = !s_buzzer; s_prefs.putBool("buzzer", s_buzzer); }
+uint8_t loraMode()  { return s_loraMode; }
+void cycleLoraMode() { s_loraMode = (uint8_t)((s_loraMode + 1) % 3); s_prefs.putUChar("loraMode", s_loraMode); }
+uint8_t loraListen() { return s_loraListen; }
+// BOTH, MESHTASTIC, MESHCORE, OFF, and round.
+void cycleLoraListen() {
+    static const uint8_t NEXT[4] = { 3, 2, 0, 1 };
+    s_loraListen = NEXT[s_loraListen & 3];
+    s_prefs.putUChar("loraLstn", s_loraListen);
+}
+const char* loraListenName() {
+    static const char* const N[4] = { "OFF", "MESHTASTIC", "MESHCORE", "BOTH" };
+    return N[s_loraListen & 3];
+}
+uint8_t loraRegion() { return s_loraRegion; }
+void setLoraRegion(uint8_t r) { s_loraRegion = r > 2 ? 0 : r; s_prefs.putUChar("loraRgn", s_loraRegion); }
+uint8_t loraFocus() { return s_loraFocus; }
+void setLoraFocus(uint8_t ix) { s_loraFocus = ix; s_prefs.putUChar("loraFocus", ix); }
+// Keys: 8, 9, 9 and 9 characters, inside NVS's limit of 15, and none of them is
+// a prefix of "loraChans" -- which matters, because that entry holds the whole
+// channel list and is the one thing in this namespace that must not be
+// shadowed by a near-miss key.
+bool loraLookups()       { return s_loraLookups; }
+void toggleLoraLookups() { s_loraLookups = !s_loraLookups; s_prefs.putBool("loraLkup", s_loraLookups); }
+bool loraLookupCall()       { return s_loraLkCall; }
+void toggleLoraLookupCall() { s_loraLkCall = !s_loraLkCall; s_prefs.putBool("loraLkCal", s_loraLkCall); }
+bool loraLookupOgn()       { return s_loraLkOgn; }
+void toggleLoraLookupOgn() { s_loraLkOgn = !s_loraLkOgn; s_prefs.putBool("loraLkOgn", s_loraLkOgn); }
+bool loraLookupFeed()       { return s_loraLkFeed; }
+void toggleLoraLookupFeed() { s_loraLkFeed = !s_loraLkFeed; s_prefs.putBool("loraLkMcF", s_loraLkFeed); }
+
+// The channel list. Bytes in, bytes out: the store does not know or care what
+// a MeshCore hashtag is, which is why this pair takes a blob and the record
+// format lives with the decoders that write it.
+size_t loraChannels(uint8_t* out, size_t cap) {
+    if (!out || !cap) return 0;
+    // getBytesLength on a missing key is 0, which is exactly the empty list --
+    // no separate "has this ever been written" flag needed.
+    size_t len = s_prefs.getBytesLength("loraChans");
+    if (!len) return 0;
+    if (len > cap) len = cap;
+    return s_prefs.getBytes("loraChans", out, len);
+}
+
+bool setLoraChannels(const uint8_t* rec, size_t n) {
+    // Preferences::putBytes returns early on a zero-length value without
+    // touching NVS, so writing an empty list would be a silent no-op and the
+    // old blob would survive to be restored at the next boot. That exact bug
+    // shipped in v1.5.6 through v1.5.19 in IgnoreList::save(); emptying the list has
+    // to remove the key instead.
+    if (!rec || !n) { s_prefs.remove("loraChans"); return true; }
+    return s_prefs.putBytes("loraChans", rec, n) == n;
+}
 
 // ---- easter-egg hunt progress ----------------------------------------
 // Packed into one NVS entry rather than one each: the store has a few
@@ -411,12 +471,23 @@ void load() {
     // The old on/off switch carries over: a watch that had BUZZ off stays off.
     s_buzzMode     = s_prefs.getUChar("buzzMode", s_prefs.getBool("buzz", true) ? 2 : 0);
     if (s_buzzMode > 3) s_buzzMode = 2;
-    s_steady       = s_prefs.getBool("steady", false);
     s_radioDutyIx  = s_prefs.getUChar("pwrRadio", RADIO_DUTY_DEFAULT);
     if (s_radioDutyIx >= RADIO_DUTY_N) s_radioDutyIx = RADIO_DUTY_DEFAULT;
     // The T-Watch's BUZZ (haptics on an alert) already owns "buzz", and with
     // the opposite default, so the CrowPanel's buzzer keeps its own key.
     s_buzzer       = s_prefs.getBool("buzzer", false);
+    s_loraMode     = s_prefs.getUChar("loraMode", 2);
+    if (s_loraMode > 2) s_loraMode = 2;
+    s_loraFocus    = s_prefs.getUChar("loraFocus", 0);
+    s_loraRegion   = s_prefs.getUChar("loraRgn", 0);
+    s_loraListen   = s_prefs.getUChar("loraLstn", 3);
+    if (s_loraListen > 3) s_loraListen = 3;
+    if (s_loraRegion > 2) s_loraRegion = 0;
+    // False, every time, unless somebody has said otherwise on this board.
+    s_loraLookups  = s_prefs.getBool("loraLkup", false);
+    s_loraLkCall   = s_prefs.getBool("loraLkCal", false);
+    s_loraLkOgn    = s_prefs.getBool("loraLkOgn", false);
+    s_loraLkFeed   = s_prefs.getBool("loraLkMcF", false);
     s_lightOn      = s_prefs.getBool("ltOn", true);
     s_lightAlerts  = s_prefs.getBool("ltAlert", true);
     s_lightMsgs    = s_prefs.getBool("ltMsg", true);
@@ -424,7 +495,11 @@ void load() {
     s_banter       = s_prefs.getUChar("banter", 2);
     if (s_banter > 3) s_banter = 2;
     s_lightColor   = s_prefs.getUChar("ltColor", 0);
-    s_lightBright  = s_prefs.getUChar("ltBright", 2);
+    // Seven steps since v1.25: two dimmer ones went in under the old five,
+    // under a new key. A board that saved one of the five keeps its level
+    // (old 1..5 is new 3..7) instead of dropping two rungs.
+    if (s_prefs.isKey("ltBri7")) s_lightBright = s_prefs.getUChar("ltBri7", 4);
+    else                         s_lightBright = (uint8_t)(s_prefs.getUChar("ltBright", 2) + 2);
     // On by default since v1.7.7: a squad member can only ever make this board
     // install a signed release newer than the one it runs, with a countdown
     // and SKIP, and the trust is the phrase they already hold. Off is for
@@ -438,7 +513,7 @@ void load() {
     Clock::applyZone(s_timeZone);
     if (s_lightIdle > 2)                 s_lightIdle = 1;
     if (s_lightColor >= LIGHT_COLOR_N)   s_lightColor = 0;
-    if (s_lightBright < 1 || s_lightBright > 5) s_lightBright = 2;
+    if (s_lightBright < 1 || s_lightBright > 7) s_lightBright = 4;
     // A saved index from a build with more steps than this one must not walk
     // off the end of the table.
     if (s_scrTimeoutIx >= SCREEN_TIMEOUTS_N) s_scrTimeoutIx = 2;
@@ -644,7 +719,7 @@ void cycleLightColor() {
     else                         s_lightColor++;
     s_prefs.putUChar("ltColor", s_lightColor);
 }
-void cycleLightBrightness() { s_lightBright = (uint8_t)(s_lightBright % 5 + 1);          s_prefs.putUChar("ltBright", s_lightBright); }
+void cycleLightBrightness() { s_lightBright = (uint8_t)(s_lightBright % 7 + 1);          s_prefs.putUChar("ltBri7", s_lightBright); }
 bool remoteUpdate()         { return s_remoteUpdate; }
 void toggleRemoteUpdate()   { s_remoteUpdate = !s_remoteUpdate; s_prefs.putBool("rmtUpd", s_remoteUpdate); }
 bool phraseShown()          { return s_phraseShown; }

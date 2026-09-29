@@ -60,10 +60,10 @@ enum class SettingsRow : uint8_t {
     WATCH_IDLE_CPU,  // the T-Watch only: SLEEP CPU, the clock while the screen is asleep
     WATCH_BUZZ,      // the T-Watch only: buzz on an alert, OFF / HIGH / MED / LOW
     WATCH_SETTINGS,  // the T-Watch only: the row on the main list that opens the WATCH SETTINGS page
-    WATCH_RADIO_RESET, // the T-Watch only: power cycle the watch to wake the radios, under WATCH
-    WATCH_STEADY,    // the T-Watch only: STEADY POWER, DC1 held in PWM, under WATCH
     WATCH_TEMP,      // the T-Watch only: the chip's temperature, a reading, under WATCH
-    WATCH_XTAL,      // the T-Watch only: CLOCK CHECK, the ESP32's crystal against the clock chip's
+    WATCH_WARDRIVE,  // the T-Watch only: WARDRIVE, every network and device with where, for WiGLE
+    WATCH_LORA,      // the T-Watch only: LORA, which networks the LoRa radio listens to
+    WATCH_LORA_CHATS, // the T-Watch only: LORA CHATS, what it decoded, one chat per network
 #if defined(CROWPANEL7)
     BUZZER,          // the CrowPanel 7 only, the one board with a buzzer: OFF, or NEW ONLY
 #endif
@@ -91,11 +91,6 @@ SettingsPage uiSettingsCurrentPage();
 // Kept so existing callers read the same. APPEARANCE only.
 void uiSettingsOpenAppearance(bool open);
 
-// A tap on a group heading folds that group away, turning a list that runs
-// four screens deep into a short menu. Returns true if (x,y) hit a heading and
-// the fold was toggled, in which case the tap is spent -- call this BEFORE
-// uiSettingsHitTest().
-bool uiSettingsTapHeader(TFT_eSPI& t, int x, int y, int screenW, int screenH);
 
 // True when a mode has switched this row off (boring mode, today). A tap on
 // one says why rather than silently doing nothing.

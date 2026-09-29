@@ -17,6 +17,7 @@
 #include "ui_clear.h"    // PACE, the mascot step clock
 #include "draw_band.h"   // BAND, the 3.5in row gate
 #include "squachy.h"     // TEMPO, his durations
+#include "lora_sniffer.h" // LORA ..., the radio (a no-op on a board without one)
 
 // PRIM, on every build: main.cpp runs the primitive benchmark on its next pass.
 extern volatile bool g_benchPrimNow;
@@ -49,12 +50,15 @@ extern volatile bool g_benchUpdateStop;
 // INVERT and ROT: the colour-check toggles and the corner rotate button,
 // from the console, for bringing up a panel nobody can read yet.
 extern volatile bool g_consoleInvert;
+extern volatile bool g_consoleAdc;
 extern volatile bool g_consoleWatchTest;
 extern volatile bool g_consoleRotate;
 extern volatile bool g_consoleBatt;
 extern volatile bool g_consoleBattLog;
 extern volatile bool g_consoleRadioTest;
 extern volatile bool g_consolePmu;
+extern volatile uint8_t g_consoleGps;
+extern volatile int32_t g_consoleFakeLat7, g_consoleFakeLon7;
 extern volatile bool g_consoleRtc;
 extern volatile bool g_consoleBuzz;
 extern volatile bool g_consoleMotion;
@@ -531,12 +535,31 @@ void pollSerial() {
             continue;
         }
         if (strcasecmp(line, "INVERT") == 0) { g_consoleInvert = true; continue; }
+        if (strcasecmp(line, "ADC") == 0)    { g_consoleAdc = true; continue; }
         if (strcasecmp(line, "WATCHTEST") == 0) { g_consoleWatchTest = true; continue; }
         if (strcasecmp(line, "ROT") == 0)    { g_consoleRotate = true; continue; }
         if (strcasecmp(line, "BATT") == 0)    { g_consoleBatt = true; continue; }
         if (strcasecmp(line, "BATTLOG") == 0) { g_consoleBattLog = true; continue; }
         if (strcasecmp(line, "RADIO TEST") == 0) { g_consoleRadioTest = !g_consoleRadioTest; Serial.printf("[radio] bench test %s\n", g_consoleRadioTest ? "ON: cycling on the cable, screen or not" : "OFF"); continue; }
         if (strcasecmp(line, "PMU") == 0)    { g_consolePmu = true; continue; }
+        if (strcasecmp(line, "GPS") == 0)    { g_consoleGps = 1; continue; }
+        if (strcasecmp(line, "GPS OFF") == 0) { g_consoleGps = 2; continue; }
+        if (strcasecmp(line, "GPS STATUS") == 0) { g_consoleGps = 3; continue; }
+        if (strncasecmp(line, "GPS FAKE ", 9) == 0) {
+            // Decimal degrees, e.g. GPS FAKE 40.7128 -74.0060.
+            const double la = atof(line + 9);
+            const char* sp = strchr(line + 9, ' ');
+            const double lo = sp ? atof(sp + 1) : 0;
+            g_consoleFakeLat7 = (int32_t)(la * 10000000.0);
+            g_consoleFakeLon7 = (int32_t)(lo * 10000000.0);
+            g_consoleGps = 4;
+            continue;
+        }
+        if (strcasecmp(line, "WARDRIVE ON") == 0)  { g_consoleGps = 5; continue; }
+        if (strcasecmp(line, "WARDRIVE OFF") == 0) { g_consoleGps = 6; continue; }
+        if (strcasecmp(line, "WIGLE") == 0)        { g_consoleGps = 7; continue; }
+        if (strcasecmp(line, "WIGLE ALL") == 0)    { g_consoleGps = 8; continue; }
+        if (strcasecmp(line, "WIGLE CLEAR") == 0)  { g_consoleGps = 9; continue; }
         if (strcasecmp(line, "RTC") == 0)    { g_consoleRtc = true; continue; }
         if (strcasecmp(line, "BUZZ") == 0)   { g_consoleBuzz = true; continue; }
         if (strcasecmp(line, "MOTION") == 0) { g_consoleMotion = true; continue; }
@@ -546,6 +569,7 @@ void pollSerial() {
             Serial.printf("[radio] duty -> %s\n", Settings::radioDutyName(Settings::radioDutyRaw()));
             continue;
         }
+        if (Lora::console(line)) continue;
 #if defined(ARDUINO_ARCH_ESP32)   // the radios themselves: nothing to ask in the emulator
         if (strcasecmp(line, "RADIO HEAL") == 0) { g_consoleHeal = true; continue; }
         if (strcasecmp(line, "RADIO FULLCAL") == 0) {

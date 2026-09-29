@@ -1,5 +1,9 @@
 // SquachWatch-CYD — settings screen implementation
 #include "ui_settings.h"
+#include "wardrive.h"
+#if SQUACH_LORA
+#include "ui_lorachat.h"
+#endif
 #include "ota_core.h"
 #include "ota_wifi.h"
 #include "theme.h"
@@ -32,10 +36,6 @@ static int g_scrollFor[5] = { 0, 0, 0, 0, 0 };
 // strip, so a disagreement puts the last row under it, untappable.
 #define PINNED_BACK_H (Theme::pinnedBackH(screenW))
 
-// Which groups are folded shut. Session-only on purpose: a fold is a "get this
-// out of my way for a minute", not a preference worth surviving a reboot.
-static bool s_folded[7] = { false, false, false, false, false, false, false };
-
 // Whether a watch/hunt target exists. Set every tick from the engine, read by
 // buildDisplayList() -- which has no engine of its own, and is called by the
 // hit test as well as the draw. Same pattern ui_clear.cpp uses for its crowd.
@@ -57,9 +57,8 @@ void boardBatteryLine(char* out, size_t n);    // main.cpp: the divider on GPIO9
 #endif
 #if defined(TWATCH_S3)
 void twatchBatteryLine(char* out, size_t n);   // main.cpp, where the power chip lives
-bool twatchRadioResetArmed();                  // main.cpp: the first tap of two
+uint8_t twatchGpsState();                      // main.cpp: 0 off, 1 starting, 2 no fix, 3 fix
 int  twatchChipC();                            // main.cpp: the chip's temperature, cached
-void twatchXtalLine(char* out, size_t n);      // main.cpp: CLOCK CHECK's state or result
 #endif
 
 static const SettingsRow ALL_ROWS[] = {
@@ -124,10 +123,13 @@ static const SettingsRow APPEARANCE_ROWS[] = {
 // The WATCH SETTINGS page: the battery first (a reading), then the knobs that
 // decide how long it lasts, then the buzz, then the tools.
 static const SettingsRow WATCH_ROWS[] = {
-    SettingsRow::WATCH_BATTERY, SettingsRow::WATCH_RADIO, SettingsRow::WATCH_LISTEN,
+    SettingsRow::WATCH_BATTERY, SettingsRow::WATCH_WARDRIVE,
+#if SQUACH_LORA
+    SettingsRow::WATCH_LORA_CHATS, SettingsRow::WATCH_LORA,
+#endif
+    SettingsRow::WATCH_RADIO, SettingsRow::WATCH_LISTEN,
     SettingsRow::WATCH_IDLE_CPU, SettingsRow::WATCH_BUZZ,
-    SettingsRow::WATCH_RADIO_RESET, SettingsRow::WATCH_STEADY, SettingsRow::WATCH_TEMP,
-    SettingsRow::WATCH_XTAL,
+    SettingsRow::WATCH_TEMP,
 };
 static const uint8_t WATCH_ROWS_N = sizeof(WATCH_ROWS) / sizeof(WATCH_ROWS[0]);
 #endif
@@ -207,10 +209,10 @@ static RowGroupId groupFor(SettingsRow r) {
         case SettingsRow::WATCH_IDLE_CPU:
         case SettingsRow::WATCH_BUZZ:
         case SettingsRow::WATCH_SETTINGS:
-        case SettingsRow::WATCH_RADIO_RESET:
-        case SettingsRow::WATCH_STEADY:
         case SettingsRow::WATCH_TEMP:
-        case SettingsRow::WATCH_XTAL:
+        case SettingsRow::WATCH_WARDRIVE:
+        case SettingsRow::WATCH_LORA:
+        case SettingsRow::WATCH_LORA_CHATS:
             return RowGroupId::WATCH;
         // TIME ZONE sat on the SYSTEM page too, the same setting twice. Only
         // the clock reads it, so it lives with the clock.
@@ -357,9 +359,6 @@ static uint8_t buildDisplayList(DisplayItem* out) {
             lastGroup = g;
             haveLastGroup = true;
         }
-        // Folded: the heading is still drawn (that is what you tap to unfold),
-        // its rows are not.
-        if (s_folded[(uint8_t)g]) continue;
         out[count].isHeader = false;
         out[count].group = g;
         out[count].row = rows[i];
@@ -449,13 +448,11 @@ static void computeGeom(TFT_eSPI& t, int screenH, int& top, int& bodyBottom,
 // row above the one you pressed.
 
 void uiSettingsInit(TFT_eSPI& t) {
-    // Arriving at Settings is arriving at its main page, at the top, with
-    // nothing folded. Scroll memory is for moving BETWEEN pages inside one
+    // Arriving at Settings is arriving at its main page, at the top. Scroll memory is for moving BETWEEN pages inside one
     // visit -- carrying it across a fresh entry would drop you mid-list with
     // no idea why.
     s_page = SettingsPage::MAIN;
     for (uint8_t i = 0; i < 5; i++) g_scrollFor[i] = 0;
-    for (uint8_t i = 0; i < 7; i++) s_folded[i] = false;
     // Any pending question dies with the screen. Coming back to Settings and
     // finding a confirm panel still up from last time would be answering
     // something you no longer remember asking.
@@ -893,18 +890,32 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
         case SettingsRow::WATCH_SETTINGS:
             label = "WATCH SETTINGS"; value = ">";
             break;
-        case SettingsRow::WATCH_RADIO_RESET:
-            label = "RADIO RESET"; value = twatchRadioResetArmed() ? "SURE?" : "GO";
-            break;
-        case SettingsRow::WATCH_STEADY:
-            label = "STEADY POWER"; value = Settings::steadyPower() ? "ON" : "OFF";
-            break;
         case SettingsRow::WATCH_TEMP:
             label = "CHIP TEMP"; snprintf(valBuf, valBufN, "%d C", twatchChipC()); value = valBuf;
             break;
-        case SettingsRow::WATCH_XTAL:
-            label = "CLOCK CHECK"; twatchXtalLine(valBuf, valBufN); value = valBuf;
+        case SettingsRow::WATCH_WARDRIVE: {
+            // OFF, or what it is doing: finding the GPS, waiting for a fix, or
+            // logging, with how many sightings are kept.
+            label = "WARDRIVE";
+            const uint8_t g = twatchGpsState();
+            if (!Wardrive::enabled())  value = "OFF";
+            else if (g <= 1)           value = "GPS STARTING";
+            else if (g == 2)           value = "NO FIX YET";
+            else { snprintf(valBuf, valBufN, "ON  %lu", (unsigned long)Wardrive::count()); value = valBuf; }
             break;
+        }
+#if SQUACH_LORA
+        case SettingsRow::WATCH_LORA:
+            label = "LORA"; value = Settings::loraListenName();
+            break;
+        case SettingsRow::WATCH_LORA_CHATS: {
+            label = "LORA CHATS";
+            const uint16_t u = uiLoraChatUnread();
+            if (u) { snprintf(valBuf, valBufN, "%u NEW", (unsigned)u); value = valBuf; }
+            else value = "OPEN";
+            break;
+        }
+#endif
 #endif
         case SettingsRow::POWER_SAVER:
             label = "POWER SAVER"; value = Settings::powerSaver() ? "ON" : "OFF";
@@ -1134,37 +1145,6 @@ switch (Settings::background()) {
     // Over the top of everything, so the list is still visible around it and
     // it is obvious which screen you are being asked about.
     drawSettingsConfirm(t, w, h);
-}
-
-bool uiSettingsTapHeader(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
-    (void)x; (void)screenW;
-    int top, bodyBottom, rowH, headerH, tallH;
-    computeGeom(t, screenH, top, bodyBottom, rowH, headerH, tallH);
-
-    DisplayItem items[LIST_MAX_N + 7];
-    uint8_t n = buildDisplayList(items);
-    // Same clamp the draw applies, so a tap can never be tested against a
-    // scroll position the screen is not actually showing.
-    { const int m = maxScroll(items, n, top, bodyBottom, rowH, headerH, tallH);
-      if (g_scroll > m) g_scroll = m; }
-
-    int cy = top;
-    int idx = g_scroll;
-    while (idx < n) {
-        int itemH = itemHeight(items[idx], rowH, headerH, tallH);
-        if (cy + itemH > bodyBottom) break;
-        if (y >= cy && y < cy + itemH && items[idx].isHeader) {
-            const uint8_t g = (uint8_t)items[idx].group;
-            s_folded[g] = !s_folded[g];
-            // Folding shortens the list under your finger; an old scroll
-            // offset would leave you staring at blank space below the end.
-            g_scroll = 0;
-            return true;
-        }
-        cy += itemH;
-        idx++;
-    }
-    return false;
 }
 
 SettingsRow uiSettingsHitTest(TFT_eSPI& t, int x, int y, int screenW, int screenH) {

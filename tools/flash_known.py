@@ -27,7 +27,14 @@ BOARDS = {
     # that nobody means to flash.
     "a4:f0:0f:8e:3a:88": ("cyd35-fast", "3.5in, 80MHz, two-band drawing"),
     "a0:f2:62:e1:29:10": ("twatch-s3",  "LilyGo T-Watch S3, native USB (COM13 is allowed for THIS MAC only)"),
+    # The T-Watch S3 Plus: the S3's pins exactly, plus GPS on 41/42 and the
+    # PMU rails that feed it (LilyGoLib docs/hardware, 2026-09-28). The watch
+    # build never touches either, so it runs the watch build with the GPS off.
+    "68:ee:8f:48:1f:e4": ("twatch-s3",  "LilyGo T-Watch S3 Plus, native USB"),
     "d4:e9:f4:c5:0e:e0": ("freenove32", "Freenove 3.2in CYD, ST7789, resistive touch on the display bus"),
+    # Sunton ESP32-2432S032C (DIYmalls, Amazon B0CLGDHS16): 3.2in ST7789 IPS,
+    # GT911 capacitive touch, a battery charger. Issue #6's board. 2026-09-28.
+    "14:33:5c:6c:20:b8": ("cyd32c",     "Sunton ESP32-2432S032C, 3.2in ST7789 IPS, GT911 capacitive touch"),
     # 88:57:21:2e:e6:e0 runs SquachEmit, not this firmware. It is the only
     # CAPACITIVE 2.8in; to test capacitive touch, list it here as cyd-fast
     # for the test and comment it out again after (done 2026-09-21).
@@ -69,7 +76,15 @@ def main():
     if mac not in BOARDS:
         sys.exit("unknown board %s on %s: add it to BOARDS first, or leave it alone" % (mac, port))
     env, what = BOARDS[mac]
-    print("%s: %s -> %s (%s)" % (port, mac, env, what))
+    # --env NAME: a bench variant of this board's own build, and only that
+    # (NAME must extend it, e.g. twatch-s3-loratx on a twatch-s3 board).
+    build_env = env
+    if "--env" in sys.argv:
+        want = sys.argv[sys.argv.index("--env") + 1]
+        if not want.startswith(env + "-"):
+            sys.exit("refusing --env %s: %s runs %s, and a variant must extend it" % (want, mac, env))
+        build_env = want
+    print("%s: %s -> %s (%s)" % (port, mac, build_env, what))
     if "--check" in sys.argv:
         return
     if env == "twatch-s3":
@@ -77,10 +92,10 @@ def main():
         # stub changes speed, and fails "Unable to verify flash chip" even
         # without. The system esptool 5 programs it fine at the nominal speed.
         # The bootloader lives at 0x0 on an S3, not 0x1000.
-        r = subprocess.run([PIO, "run", "-e", env], cwd=ROOT)
+        r = subprocess.run([PIO, "run", "-e", build_env], cwd=ROOT)
         if r.returncode != 0:
             sys.exit("build failed")
-        build = os.path.join(ROOT, ".pio", "build", env)
+        build = os.path.join(ROOT, ".pio", "build", build_env)
         boot_app0 = os.path.join(os.path.expanduser("~"), ".platformio", "packages",
                                  "framework-arduinoespressif32", "tools", "partitions", "boot_app0.bin")
         r = subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32s3", "--port", port, "--baud", "115200",
@@ -91,7 +106,7 @@ def main():
                             "0xe000", boot_app0,
                             "0x10000", os.path.join(build, "firmware.bin")], cwd=ROOT)
     else:
-        r = subprocess.run([PIO, "run", "-e", env, "-t", "upload", "--upload-port", port], cwd=ROOT)
+        r = subprocess.run([PIO, "run", "-e", build_env, "-t", "upload", "--upload-port", port], cwd=ROOT)
     sys.exit(r.returncode)
 
 

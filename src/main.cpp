@@ -24,6 +24,9 @@
 #endif
 #define SQW_PUSH_ROWS() FramePush::lastRows()
 #endif
+#if defined(CYD32C)
+#include "gt911_touch.h"
+#endif
 #include <XPT2046_Touchscreen.h>
 #include <Preferences.h>  // AWOK's own per-rotation touch-cal storage; see the AWOK block below pollTouch()'s globals
 #include <esp_heap_caps.h>   // heap_caps_get_largest_free_block() -- diagnostics screen
@@ -51,6 +54,9 @@
 #include <esp_heap_caps.h>
 #include "ui_diagnostics.h"   // CrashReport, used by the breadcrumb below
 #include "blackbox.h"
+#include "gnss.h"
+#include "lora_sniffer.h"   // the watch's SX1262; inline no-ops elsewhere
+#include "wardrive.h"
 #include "ui_bingo.h"
 #include "bingo.h"
 #include "dex.h"
@@ -297,6 +303,9 @@ static void drawCrashCard(TFT_eSPI& t) {
 #endif
 #include "status_light.h"
 #include "ui_light.h"
+#if SQUACH_LORA
+#include "ui_lorachat.h"
+#endif
 
 // Two CYD board variants are supported from this one firmware:
 //   - jczn_2432s028r (original): resistive XPT2046 touch on its own
@@ -416,6 +425,10 @@ constexpr bool PANEL_NEEDS_INVERSION = true;
 #elif defined(FREENOVE_S3)
 // Freenove's own setup for the S3 2.8" (FNK0104AB) turns inversion on, and
 // confirmed on an FNK0104B 2026-09-25: colours right with INVERT untouched.
+constexpr bool PANEL_NEEDS_INVERSION = true;
+#elif defined(CYD32C)
+// The same IPS ST7789 as the Freenove 3.2". UNCONFIRMED until looked at;
+// INVERT in Settings flips it if wrong.
 constexpr bool PANEL_NEEDS_INVERSION = true;
 #elif defined(FREENOVE32)
 // Freenove's own setup for the 3.2" turns inversion on. UNCONFIRMED here
@@ -875,7 +888,7 @@ static bool rawReadFiltered(int16_t& a, int16_t& b) {
 // The one reader pollTouch(), the calibration and the diagnostics screen all
 // use, so what the calibration measures is exactly what touch then reads.
 static bool readTouchRaw(int16_t& a, int16_t& b) {
-#if defined(CROWPANEL7) || defined(CYD35C)
+#if defined(CROWPANEL7) || defined(CYD32C) || defined(CYD35C)
     // The GT911 already reports panel pixels; TouchFit divides by the scale,
     // so nothing else differs.
     uint16_t x, y;
@@ -1361,7 +1374,7 @@ static void squachyCatch(DetectionType type, const uint8_t* mac, uint32_t hits, 
 }
 
 #if defined(TWATCH_S3)
-enum class Buzz : uint8_t { ALERT, WATCH, SAMPLE };
+enum class Buzz : uint8_t { ALERT, WATCH, SAMPLE, MESSAGE };
 static void twatchBuzz(Buzz kind);
 #endif
 static void enterAlert(const Detection& d) {
@@ -1554,6 +1567,7 @@ static void enterInvite() {
 
 // INVERT and ROT on the console -- see clock.cpp. Consumed in loop().
 volatile bool g_consoleInvert = false;
+volatile bool g_consoleAdc = false;     // ADC: the spare analog inputs, for finding a battery sense line
 volatile bool g_consoleRotate = false;
 volatile bool g_consoleWatchTest = false; // WATCHTEST: watch the newest Bluetooth device, fire its alert
 volatile bool g_consoleRadioTest = false; // RADIO TEST: cycle even on the cable with the screen on (bench)
@@ -1565,6 +1579,8 @@ volatile bool g_consoleMotion = false; // MOTION: the motion sensor's reading an
 volatile bool g_consoleBuzz = false;  // BUZZ: play the alert pattern now and report the driver (watch)
 volatile bool g_consoleRtc = false;   // RTC: read the clock chip (watch)
 volatile bool g_consolePmu = false;   // PMU: dump the power chip's registers (watch)
+volatile uint8_t g_consoleGps = 0;    // GPS, WARDRIVE and WIGLE commands: the S3 Plus's GNSS (watch)
+volatile int32_t g_consoleFakeLat7 = 0, g_consoleFakeLon7 = 0;   // GPS FAKE lat lon
 
 #ifdef BENCH_TOOLS
 // UPDATE NOW and UPDATE STOP on the console, for the bench: the unattended
@@ -1988,6 +2004,9 @@ static void performWipe(WipeBoot after) {
     Security::wipeSecrets();
     engine.sd().wipe();
     BlackBox::wipe();        // the log and the crash history kept in flash
+#if defined(TWATCH_S3)
+    Wardrive::clear();       // where the watch has been, and everything it heard there
+#endif
 #if HAVE_NVS_ERASE
     // The frame buffer is 77 KB the wipe can have: the board restarts in a
     // moment and the screen is meant to go quiet anyway. Without it the copy
@@ -2016,6 +2035,14 @@ static void enterPower() {
     transitionStart = millis();
     uiPowerInit(*canvas);
 }
+
+#if SQUACH_LORA
+static void enterLoraChat() {
+    state = AppState::LORA_CHAT;
+    transitionStart = millis();
+    uiLoraChatInit(*canvas);
+}
+#endif
 
 static void enterLight() {
     state = AppState::STATUS_LIGHT;
@@ -2184,6 +2211,8 @@ static void twatchBuzz(Buzz kind) {
     if (kind == Buzz::WATCH) {               // three long buzzes
         const uint8_t e = lvl == 2 ? 16 : 47;
         seq[0] = e; seq[1] = 0x80 | 12; seq[2] = e; seq[3] = 0x80 | 12; seq[4] = e;
+    } else if (kind == Buzz::MESSAGE) {      // one click: a message, not an alert
+        seq[0] = lvl == 0 ? 1 : 14;
     } else {                                 // a double click, or a double buzz
         const uint8_t e = lvl == 0 ? 1 : lvl == 1 ? 14 : 15;
         seq[0] = e; seq[1] = 0x80 | 10; seq[2] = e;
@@ -2192,7 +2221,7 @@ static void twatchBuzz(Buzz kind) {
     s_drvAwakeAt = millis();
     for (uint8_t i = 0; i < 8; i++) drvWrite(0x04 + i, seq[i]);
     const bool go = drvWrite(0x0C, 0x01);    // GO
-    Serial.printf("[buzz] %s%s\n", kind == Buzz::WATCH ? "watch alert" : kind == Buzz::ALERT ? "alert" : "sample",
+    Serial.printf("[buzz] %s%s\n", kind == Buzz::WATCH ? "watch alert" : kind == Buzz::ALERT ? "alert" : kind == Buzz::MESSAGE ? "lora message" : "sample",
                   go ? "" : " -- the motor driver did not answer");
 }
 
@@ -2470,26 +2499,14 @@ static void twatchXtalTick(uint32_t now) {
                   (unsigned long)n, (unsigned long)us, (long)s_xtalPpm, s_xtalChipC,
                   (unsigned long)advertsSeen(), (unsigned long)wifiFramesSeen());
 }
-void twatchXtalLine(char* out, size_t n) {
-    switch (s_xtalState) {
-        case 1: {
-            const uint32_t el = (millis() - s_xtalStartMs) / 1000u;
-            snprintf(out, n, "%lus", (unsigned long)(el < XTAL_SECS ? XTAL_SECS - el : 0));
-            break;
-        }
-        case 2:  snprintf(out, n, "%+ld PPM", (long)s_xtalPpm); break;
-        case 3:  snprintf(out, n, "FAILED"); break;
-        default: snprintf(out, n, "GO"); break;
-    }
-}
 
-// STEADY POWER: DC1 -- the ESP32 and its radio -- in forced PWM, or back to
-// the chip's automatic PWM/PFM. Applied at boot and on every toggle.
+// DC1 -- the ESP32 and its radio -- in the chip's automatic PWM/PFM. The
+// STEADY POWER row that forced PWM was a test for the deaf radios, which
+// were never the supply's fault (the slim WiFi re-init, fixed in v1.21.0);
+// set at boot so a watch that saved STEADY ON goes back to automatic.
 static void twatchApplySteady() {
     if (!s_pmuOk) return;
-    s_pmu.settDC1WorkModeToPwm(Settings::steadyPower() ? 1 : 0);
-    Serial.printf("[pmu] DC1 %s (reg 0x81 = %02X)\n", Settings::steadyPower() ? "forced PWM (STEADY POWER)" : "automatic PWM/PFM",
-                  (unsigned)s_pmu.readRegister(0x81));
+    s_pmu.settDC1WorkModeToPwm(0);
 }
 
 static void twatchBatterySample(uint8_t why) {
@@ -2507,7 +2524,7 @@ static void twatchBatterySample(uint8_t why) {
     if (!s_panelAsleep)     r.flags |= BlackBox::BATT_SCREEN_ON;
     if (!s_radiosResting)   r.flags |= BlackBox::BATT_RADIOS_ON;
     r.chipC   = (int8_t)twatchChipC();
-    r.steady  = Settings::steadyPower() ? 1 : 0;
+    r.steady  = 0;
     r.adverts = advertsSeen();
     r.frames  = wifiFramesSeen();
     BlackBox::noteBattery(r);
@@ -2637,20 +2654,6 @@ static void twatchPowerCycle(uint8_t count, uint8_t why) {
     delay(100);
     esp_sleep_enable_timer_wakeup(1000000ULL);
     esp_deep_sleep_start();
-}
-
-// RADIO RESET under WATCH: two taps within three seconds, so a stray one
-// does not blank the watch. Does not spend the self-heal's allowance.
-static uint32_t s_radioResetArmedAt = 0;
-bool twatchRadioResetArmed() {
-    return s_radioResetArmedAt && millis() - s_radioResetArmedAt < 3000;
-}
-static void twatchRadioResetTap() {
-    if (!twatchRadioResetArmed()) { s_radioResetArmedAt = millis(); if (!s_radioResetArmedAt) s_radioResetArmedAt = 1; return; }
-    s_radioResetArmedAt = 0;
-    Serial.printf("[heal] RADIO RESET tapped: %lu adverts and %lu WiFi frames since boot; restarting\n",
-                  (unsigned long)advertsSeen(), (unsigned long)wifiFramesSeen());
-    twatchPowerCycle(0, BlackBox::BATT_WHY_RESET);
 }
 
 static bool bleShouldHear() {
@@ -2802,6 +2805,9 @@ static void printBootBanner() {
 }
 
 // ---- Arduino setup / loop ----
+#if defined(TWATCH_S3)
+static void wardriveBegin();
+#endif
 void setup() {
     // Before anything else can allocate: the breadcrumb has to be read out
     // while it is still the previous life's, not this one's.
@@ -2847,7 +2853,7 @@ void setup() {
 // ... and not on the CrowPanel 7, where GPIO21 is the panel's BLUE-0 data
 // line. Driving it high before the panel driver claims it is a stripe down the
 // picture at best.
-#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(SQW_S3) && !defined(CROWPANEL7) && !defined(CYD35)
+#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(SQW_S3) && !defined(CROWPANEL7) && !defined(CYD35) && !defined(CYD32C)
     pinMode(21, OUTPUT); digitalWrite(21, HIGH);
 #endif
 #if defined(SQW_S3)
@@ -2861,7 +2867,7 @@ void setup() {
     // RGB data line.
 #else
     pinMode(27, OUTPUT); digitalWrite(27, HIGH);
-#if !defined(FREENOVE32) && !defined(CYD35)   // not a known-spare pin on the Freenove; its backlight is 27 alone; on CYD35 pin 32 is touch SCL
+#if !defined(FREENOVE32) && !defined(CYD35) && !defined(CYD32C)   // not a spare pin on the Freenove, and the 2432S032C/3248S035C's touch SCL; both light 27 alone
     pinMode(32, OUTPUT); digitalWrite(32, HIGH);  // AWOK's real BL pin; unused GPIO on the other two boards
 #endif
 #endif
@@ -2939,14 +2945,13 @@ void setup() {
     // flash/PSRAM lines and the power chip's interrupt on an S3.
     ledcSetup(BL_CH_ORIG, 5000, 8);
     ledcAttachPin(BL_PIN_S3, BL_CH_ORIG);
-#else
-#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(CYD35)
+#if !defined(AWOK) && !defined(RLPHANTOM) && !defined(RLPHANTOM_R) && !defined(CYD35) && !defined(CYD32C)
     ledcSetup(BL_CH_ORIG, 5000, 8);
     ledcAttachPin(BL_PIN_ORIG, BL_CH_ORIG);
 #endif
     ledcSetup(BL_CH_CAP, 5000, 8);
     ledcAttachPin(BL_PIN_CAP, BL_CH_CAP);
-#if !defined(FREENOVE32) && !defined(CYD35)   // see the pinMode(32) above; a channel with no pin is harmless to write
+#if !defined(FREENOVE32) && !defined(CYD35) && !defined(CYD32C)   // see the pinMode(32) above; a channel with no pin is harmless to write
     ledcSetup(BL_CH_AWOK, 5000, 8);
     ledcAttachPin(BL_PIN_AWOK, BL_CH_AWOK);
 #endif
@@ -3071,12 +3076,7 @@ void setup() {
     // and can go anywhere after the display is up.
     FramePush::begin();
 
-#if defined(CYD35C)
-    // ESP32-3248S035C: GT911 capacitive touch on I2C (SDA=33, SCL=32, RST=25, INT=21).
-    usingCapTouch = Gt911::begin(PIN_I2C_SDA, PIN_I2C_SCL, PIN_TOUCH_RST, PIN_TOUCH_INT);
-    Serial.println(usingCapTouch ? "ESP32-3248S035C -- GT911 capacitive touch answered."
-                                 : "ESP32-3248S035C -- GT911 did not answer; no touch.");
-#elif defined(CYD35)
+#if defined(CYD35) && !defined(CYD35C)
     // The standalone XPT2046_Touchscreen library (own SPIClass, own
     // IRQ pin) produced constant garbage reads and a free-running IRQ
     // here -- not a wrong-pin problem, a second SPI master fighting
@@ -3111,6 +3111,13 @@ void setup() {
     // buzzer a crash may have left sounding -- the helper keeps its state
     // across our reset. Not a boot beep.
     CrowBuzzer::begin();
+#elif defined(CYD32C) || defined(CYD35C)
+    // The GT911, on the CYD's capacitive I2C pins. Raw panel pixels in the
+    // panel's own portrait frame, so the five-target calibration maps them
+    // onto the screen like any other capacitive CYD.
+    usingCapTouch = Gt911::begin();
+    Serial.println(usingCapTouch ? "ESP32-2432S032C / 3248S035C -- GT911 capacitive touch answered."
+                                 : "ESP32-2432S032C / 3248S035C -- GT911 did not answer; no touch.");
 #elif defined(TWATCH_S3)
     // The T-Watch's FT6336, on I2C SDA 39 / SCL 40 at 0x38. No reset line;
     // the AXP2101 powers it (ALDO3) in twatchPowerUp(), before this runs.
@@ -3173,8 +3180,9 @@ void setup() {
         uint32_t windowStart = millis();
         while (millis() - windowStart < 1200) {
             int16_t a, b;
-#if defined(CROWPANEL7) || defined(CYD35C)
-            // The GT911 is read via readTouchRaw directly
+#if defined(CROWPANEL7) || defined(CYD32C) || defined(CYD35C)
+            // The GT911 is neither of the two below; the two-way dispatch
+            // polled a capacitive controller that is not on this bus.
             bool down = readTouchRaw(a, b);
 #else
             bool down = usingCapTouch ? rawReadCap(a, b) : rawReadResistive(a, b);
@@ -3294,6 +3302,11 @@ void setup() {
     }
 
 #if defined(TWATCH_S3)
+    // The wardrive log, and its GPS if wardriving was left on.
+    wardriveBegin();
+#endif
+
+#if defined(TWATCH_S3)
     // What the watch is like at the moment the radios start. A boot that
     // ran the touch calibration first hears the room; a plain boot comes up
     // deaf. Logged so the two kinds of boot can be compared line by line.
@@ -3309,6 +3322,11 @@ void setup() {
     }
 #endif
     engine.init();
+#if SQUACH_LORA
+    // The LoRa radio, after WiFi and Bluetooth: its own task and its own bus.
+    // Receive only. Console LORA for what it hears.
+    Lora::begin();
+#endif
 #if defined(CROWPANEL7_PERIPH_PROBE)
     crowPeriphProbe();
 #endif
@@ -3525,6 +3543,277 @@ static const char* s_lastScreenName = nullptr;
 static uint32_t    s_lastScreenUs   = 0;
 static uint32_t    s_lastScreenAt   = 0;     // transitionStart of the screen being timed
 
+#if defined(TWATCH_S3)
+// ---- GPS and wardriving (the T-Watch S3 Plus) --------------------------------
+// The S3 Plus carries a u-blox MIA-M10Q (an LS550G on some batches). Its
+// sentences go to Gnss (gnss.h); a fix stamps what Wardrive (wardrive.h)
+// writes. The plain S3 has no GNSS: the probe finds nothing, says so once,
+// and powers the rails back down.
+//
+// The board variant (arduino-esp32 variants/lilygo_twatch_s3) has the ESP32
+// receiving on GPIO41 and sending on 42; LilyGo's docs table names the same
+// pins from the module's side, which reads the other way round. Power: BLDO1
+// on revisions with BOOT/RST buttons, DC3 on earlier ones, and the LS550G
+// version also wants DC4 at 850 mV (LilyGoLib docs/hardware).
+//
+// Console: GPS / GPS OFF / GPS STATUS; GPS FAKE lat lon (a bench fix, rows
+// marked and left out of an export); WARDRIVE ON / OFF; WIGLE (the file, over
+// USB), WIGLE ALL (bench rows too), WIGLE CLEAR.
+static bool     s_gpsOn = false, s_gpsFound = false;
+static uint8_t  s_gpsTry = 0;           // index into GPS_BAUDS, then the DC4 retry
+static uint32_t s_gpsTryAt = 0, s_gpsSumAt = 0, s_gpsGoodAt = 0;
+static const uint32_t GPS_BAUDS[] = { 38400, 9600, 115200 };
+// The best since switched on, for a watch that was off the cable while it
+// happened: GPS STATUS asks.
+static uint32_t s_gpsOnAt = 0, s_gpsFirstFixMs = 0;
+static uint8_t  s_gpsBestView = 0, s_gpsBestHeard = 0, s_gpsBestUsed = 0;
+static bool     s_gpsSummaries = false;  // the 5 s lines, only when asked for on the console
+extern volatile uint8_t g_consoleGps;    // 1 on, 2 off, 3 status, 4 fake, 5..7 wardrive/wigle
+extern volatile int32_t g_consoleFakeLat7, g_consoleFakeLon7;
+
+static void gpsPower(bool on, bool dc4) {
+    if (on) {
+        s_pmu.setBLDO1Voltage(3300); s_pmu.enableBLDO1();
+        s_pmu.setDC3Voltage(3300);   s_pmu.enableDC3();
+        if (dc4) { s_pmu.setDC4Voltage(850); s_pmu.enableDC4(); }
+    } else {
+        s_pmu.disableBLDO1(); s_pmu.disableDC3(); s_pmu.disableDC4();
+    }
+}
+
+static void gpsOpen(uint32_t baud) {
+    Serial1.end();
+    Serial1.begin(baud, SERIAL_8N1, 41, 42);   // our RX 41, TX 42
+    s_gpsTryAt = millis();
+    s_gpsGoodAt = Gnss::good();
+}
+
+static void gpsStart(bool summaries) {
+    if (!s_pmuOk) return;
+    s_gpsOn = true; s_gpsFound = false; s_gpsTry = 0;
+    s_gpsSummaries = summaries;
+    s_gpsOnAt = millis(); s_gpsFirstFixMs = 0;
+    s_gpsBestView = s_gpsBestHeard = s_gpsBestUsed = 0;
+    Gnss::reset();
+    gpsPower(true, false);
+    delay(50);
+    gpsOpen(GPS_BAUDS[0]);
+    s_gpsSumAt = millis();
+}
+
+static void gpsStop() {
+    s_gpsOn = false;
+    Serial1.end();
+    gpsPower(false, false);
+}
+
+#if SQUACH_LORA
+// New LoRa chat messages: a pink pill at the top of the main screen, under
+// the GPS counter when that is showing, and only while there is something
+// unread. A tap opens LORA CHATS. Drawn with the GPS counter, under the
+// speech bubbles.
+static int16_t s_loraBadgeX = -1, s_loraBadgeY = 0, s_loraBadgeW = 0, s_loraBadgeH = 0;
+void twatchLoraBadge(TFT_eSPI& t) {
+    s_loraBadgeX = -1;
+    const uint16_t u = uiLoraChatUnread();
+    if (!u || Settings::loraListen() == 0) return;
+    char txt[20];
+    snprintf(txt, sizeof txt, "LORA %u NEW", (unsigned)u);
+    t.setTextSize(Theme::uiTextSize(t, 1));
+    const int w = t.textWidth(txt) + 10, h = t.fontHeight() + 6;
+    const int x = (t.width() - w) / 2;
+    const int y = s_gpsOn ? 4 + h + 3 : 4;
+    t.fillRoundRect(x, y, w, h, 4, Theme::BG);
+    t.drawRoundRect(x, y, w, h, 4, Theme::PINK);
+    t.setTextColor(Theme::PINK, Theme::BG);
+    t.setCursor(x + 5, y + 3);
+    t.print(txt);
+    s_loraBadgeX = (int16_t)x; s_loraBadgeY = (int16_t)y; s_loraBadgeW = (int16_t)w; s_loraBadgeH = (int16_t)h;
+}
+// A finger's worth of slack around it: the pill is small on a watch.
+static bool twatchLoraBadgeHit(int x, int y) {
+    return s_loraBadgeX >= 0 && x >= s_loraBadgeX - 8 && x < s_loraBadgeX + s_loraBadgeW + 8 &&
+           y >= s_loraBadgeY - 6 && y < s_loraBadgeY + s_loraBadgeH + 8;
+}
+// One soft buzz for a new message, not while the chats are open, and not
+// more than once in thirty seconds however busy the channel is.
+static void twatchLoraBuzzTick(uint32_t now) {
+    static uint32_t lastCheck = 0, lastBuzz = 0;
+    static uint16_t lastUnread = 0;
+    if (now - lastCheck < 1000) return;
+    lastCheck = now;
+    const uint16_t u = uiLoraChatUnread();
+    if (u > lastUnread && state != AppState::LORA_CHAT && (!lastBuzz || now - lastBuzz > 30000)) {
+        lastBuzz = now;
+        twatchBuzz(Buzz::MESSAGE);
+    }
+    lastUnread = u;
+}
+#endif
+
+// While the GPS is on, a small counter at the top of the main screen: how
+// many satellites it hears, how many it uses, FIX once it has one -- and,
+// wardriving, how many rows are kept. Read without a cable, on a windowsill.
+// Drawn by uiClearTick() straight after the background, like the corner
+// clock, so Squachy's speech bubbles go over it rather than under it.
+void twatchGpsBadge(TFT_eSPI& t) {
+    if (!s_gpsOn) return;
+    const Gnss::Sky k = Gnss::sky();
+    const Gnss::Fix& f = Gnss::fix();
+    const bool fix = Gnss::fresh(millis());
+    char txt[40];
+    if (!s_gpsFound)                   snprintf(txt, sizeof txt, "GPS STARTING");
+    else if (fix && Wardrive::enabled()) snprintf(txt, sizeof txt, "GPS FIX %u  %lu ROWS", f.used, (unsigned long)Wardrive::count());
+    else if (fix)                      snprintf(txt, sizeof txt, "GPS FIX  %u SATS", f.used);
+    else                               snprintf(txt, sizeof txt, "GPS %u HEARD  %u USED", k.heard, f.used);
+    t.setTextSize(Theme::uiTextSize(t, 1));
+    const int w = t.textWidth(txt) + 10, h = t.fontHeight() + 6;
+    const int x = (t.width() - w) / 2, y = 4;
+    const uint16_t col = fix ? Theme::GREEN : Theme::CYAN;
+    t.fillRoundRect(x, y, w, h, 4, Theme::BG);
+    t.drawRoundRect(x, y, w, h, 4, col);
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(x + 5, y + 3);
+    t.print(txt);
+}
+
+// The WiGLE file over USB, between two marker lines tools/wigle_dump.py looks
+// for. The native USB console drops what does not fit its buffer (see the
+// setTxTimeoutMs(0) in setup), and the first export lost the end of the
+// column line that way. So this writes only as much as the buffer has room
+// for, and waits for the host to take the rest; a host that stops reading
+// for two seconds ends the export rather than hanging the watch.
+static bool usbWriteAll(const char* p, size_t n) {
+    uint32_t waitFrom = millis();
+    while (n) {
+        const int room = Serial.availableForWrite();
+        if (room <= 0) {
+            if (millis() - waitFrom > 2000) return false;
+            delay(1);
+            continue;
+        }
+        const size_t k = (size_t)room < n ? (size_t)room : n;
+        const size_t w = Serial.write((const uint8_t*)p, k);
+        p += w; n -= w;
+        if (w) waitFrom = millis();
+    }
+    return true;
+}
+
+static void wigleExport(bool includeFake) {
+    char buf[512];   // the two header lines run past 330 with a long version string
+    struct Ctx { bool fake, ok; uint32_t rows, skipped; char* buf; } c = { includeFake, true, 0, 0, buf };
+    usbWriteAll("=== WIGLE BEGIN ===\n", 20);
+    const size_t h = Wardrive::headerLines(buf, sizeof buf, FIRMWARE_VERSION, "twatch-s3", "LilyGo T-Watch S3 Plus");
+    c.ok = usbWriteAll(buf, h);
+    if (c.ok) Wardrive::forEach([](const Wardrive::Record& r, void* p) {
+        Ctx& c = *(Ctx*)p;
+        if ((r.flags & Wardrive::F_FAKE) && !c.fake) { c.skipped++; return true; }
+        const size_t n = Wardrive::csvRow(r, c.buf, 320);
+        if (n && !usbWriteAll(c.buf, n)) { c.ok = false; return false; }
+        if (n) c.rows++;
+        return true;
+    }, &c);
+    const int n = snprintf(buf, sizeof buf, "=== WIGLE END %lu rows (%lu bench rows left out)%s ===\n",
+                           (unsigned long)c.rows, (unsigned long)c.skipped, c.ok ? "" : " INCOMPLETE");
+    usbWriteAll(buf, (size_t)n);
+}
+
+static void gpsTick() {
+    const uint8_t cmd = g_consoleGps;
+    if (cmd) g_consoleGps = 0;
+    if (cmd == 1) { gpsStart(true); Serial.println("[gps] on"); }
+    else if (cmd == 2) { gpsStop(); Serial.println("[gps] off"); }
+    else if (cmd == 3) {
+        const Gnss::Fix& f = Gnss::fix();
+        Serial.printf("[gps] status: %s; on %lu s; most in view %u, heard %u, used %u; ",
+                      s_gpsOn ? "on" : "off", s_gpsOn ? (unsigned long)((millis() - s_gpsOnAt) / 1000) : 0ul,
+                      s_gpsBestView, s_gpsBestHeard, s_gpsBestUsed);
+        if (s_gpsFirstFixMs) Serial.printf("FIRST FIX after %lu s%s, now %s at %ld,%ld\n",
+                                           (unsigned long)(s_gpsFirstFixMs / 1000), Gnss::faked() ? " (fake)" : "",
+                                           Gnss::fresh(millis()) ? "fixed" : "lost", (long)f.lat7, (long)f.lon7);
+        else Serial.println("never had a fix");
+        Serial.printf("[wardrive] %s; %lu rows kept of %lu; this boot %lu written, %lu skipped as repeats, %lu dropped\n",
+                      Wardrive::enabled() ? "ON" : "off", (unsigned long)Wardrive::count(), (unsigned long)Wardrive::capacity(),
+                      (unsigned long)Wardrive::written(), (unsigned long)Wardrive::skipped(), (unsigned long)Wardrive::dropped());
+    }
+    else if (cmd == 4) {
+        const uint32_t e = Clock::isSet() ? Clock::nowEpoch() : 0;
+        Gnss::fake(g_consoleFakeLat7, g_consoleFakeLon7, e, millis());
+        if (!s_gpsFirstFixMs) s_gpsFirstFixMs = millis() - s_gpsOnAt + 1;
+        Serial.printf("[gps] BENCH FIX at %ld,%ld%s -- rows written now are marked and left out of WIGLE\n",
+                      (long)g_consoleFakeLat7, (long)g_consoleFakeLon7, e ? "" : "; the clock is not set, so no rows until it is");
+    }
+    else if (cmd == 5) { Wardrive::setEnabled(true);  if (!s_gpsOn) gpsStart(false); Serial.println("[wardrive] ON"); }
+    else if (cmd == 6) { Wardrive::setEnabled(false); gpsStop(); Serial.println("[wardrive] off"); }
+    else if (cmd == 7) wigleExport(false);
+    else if (cmd == 8) wigleExport(true);
+    else if (cmd == 9) { Wardrive::clear(); Serial.println("[wardrive] cleared"); }
+
+    // A bench fix is held until a real one replaces it; refreshed here so it
+    // does not go stale while the console test runs.
+    if (Gnss::faked()) Gnss::fake(Gnss::fix().lat7, Gnss::fix().lon7, Clock::isSet() ? Clock::nowEpoch() : 0, millis());
+
+    if (!s_gpsOn) { Wardrive::tick(millis()); return; }
+    while (Serial1.available()) Gnss::feed((char)Serial1.read(), millis());
+    const uint32_t now = millis();
+    if (!s_gpsFound) {
+        if (Gnss::good() - s_gpsGoodAt >= 3) {
+            s_gpsFound = true;
+            Serial.printf("[gps] a GNSS is talking at %lu baud\n", (unsigned long)GPS_BAUDS[s_gpsTry % 3]);
+        } else if (now - s_gpsTryAt > 2500) {
+            // Three bauds with BLDO1 and DC3, then the same three with DC4 too.
+            s_gpsTry++;
+            if (s_gpsTry == 3) { gpsPower(true, true); delay(50); }
+            if (s_gpsTry >= 6) {
+                Serial.println("[gps] no GNSS answered: not an S3 Plus, or its GPS is not powered this way");
+                gpsStop();
+                // WARDRIVE on a watch with no GPS: say so and switch it off,
+                // rather than leave a row reading GPS STARTING forever.
+                if (Wardrive::enabled()) {
+                    Wardrive::setEnabled(false);
+                    Theme::showToast("NO GPS ON THIS WATCH", "Wardriving needs the S3 Plus", Theme::AMBER);
+                }
+                return;
+            }
+            gpsOpen(GPS_BAUDS[s_gpsTry % 3]);
+        }
+    }
+    const Gnss::Sky k = Gnss::sky();
+    const Gnss::Fix& f = Gnss::fix();
+    if (k.view > s_gpsBestView) s_gpsBestView = k.view;
+    if (k.heard > s_gpsBestHeard) s_gpsBestHeard = k.heard;
+    if (f.used > s_gpsBestUsed) s_gpsBestUsed = f.used;
+    if (f.valid && !Gnss::faked() && !s_gpsFirstFixMs) {
+        s_gpsFirstFixMs = now - s_gpsOnAt;
+        Serial.printf("[gps] FIRST FIX after %lu s, %u satellites\n", (unsigned long)(s_gpsFirstFixMs / 1000), f.used);
+    }
+    // Satellite time is the best clock this watch will ever be offered.
+    if (f.valid && !Gnss::faked() && Gnss::utcEpoch() && !Clock::trusted()) {
+        if (Clock::setEpoch(Gnss::utcEpoch())) Serial.println("[clock] set from GPS");
+    }
+    Wardrive::tick(now);
+    if (s_gpsSummaries && s_gpsFound && now - s_gpsSumAt > 5000) {
+        s_gpsSumAt = now;
+        Serial.printf("[gps] %s; %u used; in view %u, heard %u\n",
+                      Gnss::fresh(now) ? "FIX" : "no fix yet", f.used, k.view, k.heard);
+    }
+}
+
+// For the WARDRIVE row: 0 off, 1 looking for the module, 2 no fix, 3 fix.
+uint8_t twatchGpsState() {
+    if (!s_gpsOn) return 0;
+    if (!s_gpsFound) return 1;
+    return Gnss::fresh(millis()) ? 3 : 2;
+}
+
+// At boot: the store, and the GPS back on if wardriving was left on.
+static void wardriveBegin() {
+    Wardrive::begin();
+    if (Wardrive::enabled()) gpsStart(false);
+}
+#endif
+
 void loop() {
     // Cheap and unconditional: available() is a register read, and this
     // is the only way in for the one serial command the firmware takes.
@@ -3638,6 +3927,10 @@ void loop() {
         touchJustUp = false;
     }
     engine.loop();
+    Lora::tick(now);   // nothing outside a SQUACH_LORA build
+#if SQUACH_LORA && defined(TWATCH_S3)
+    twatchLoraBuzzTick(now);
+#endif
     floodTick();   // nothing outside a FLOOD_BENCH build
     // The heap at the first pass of loop(), for DIAGNOSTICS' BOOT line.
     static uint32_t s_loopHeapFree = 0, s_loopHeapLargest = 0;
@@ -3784,6 +4077,23 @@ void loop() {
             }
             Serial.println(line);
         }
+    }
+    gpsTick();
+#endif
+#if defined(ESP32) && !defined(SQW_S3) && !defined(CROWPANEL7)   // hardware only: the emulators build this too
+    // ADC: every input-only analog pin the CYDs leave free, in millivolts,
+    // averaged over 16 reads. A battery divider shows up as about half the
+    // cell's voltage, and moves when the cell is unplugged.
+    if (g_consoleAdc) {
+        g_consoleAdc = false;
+        const uint8_t pins[] = { 34, 35, 36, 39 };
+        char line[96]; int n = snprintf(line, sizeof line, "[adc]");
+        for (uint8_t p : pins) {
+            uint32_t mv = 0;
+            for (int k = 0; k < 16; k++) mv += analogReadMilliVolts(p);
+            n += snprintf(line + n, sizeof line - n, "  GPIO%u %lu mV", p, (unsigned long)(mv / 16));
+        }
+        Serial.println(line);
     }
 #endif
     if (g_consoleInvert) {
@@ -4357,6 +4667,14 @@ void loop() {
                 lastTouch = now;
                 sqActive  = false;
                 enterMeshCompose();
+#if SQUACH_LORA && defined(TWATCH_S3)
+            } else if (touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS &&
+                       twatchLoraBadgeHit(tp.x, tp.y)) {
+                // The LORA pill: straight to the chats.
+                lastTouch = now;
+                sqActive  = false;
+                enterLoraChat();
+#endif
             } else if (touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS &&
                        uiClearWatchPillHit(tp.x, tp.y)) {
                 // The watch/hunt pill. Opens the alert screen, which names the
@@ -5188,12 +5506,9 @@ void loop() {
                         gestureActive = false;
                         break;
                     }
-                    // A heading folds its group away. Spends the tap.
-                    if (uiSettingsTapHeader(*canvas, gestureStartX, gestureStartY,
-                                             tft.width(), tft.height())) {
-                        gestureActive = false;
-                        break;
-                    }
+                    // Headings are labels. They used to fold their group away,
+                    // which nobody found on purpose and everybody found by
+                    // accident; a tap on one lands on no row and does nothing.
                     SettingsRow row = uiSettingsHitTest(*canvas, gestureStartX, gestureStartY, tft.width(), tft.height());
                     // Switched off by a mode: say so, rather than doing nothing
                     // and reading as a broken row.
@@ -5255,15 +5570,25 @@ void loop() {
                         case SettingsRow::WATCH_LISTEN: Settings::cycleBleListen(); break;
                         case SettingsRow::WATCH_IDLE_CPU: Settings::cycleIdleCpu(); applyCpuClock(); break;
                         case SettingsRow::WATCH_BATTERY: break;   // a reading, not a switch
-                        case SettingsRow::WATCH_RADIO_RESET: twatchRadioResetTap(); break;
-                        case SettingsRow::WATCH_STEADY:
-                            Settings::toggleSteadyPower();
-                            twatchApplySteady();
-                            twatchBatterySample(BlackBox::BATT_WHY_TIMER);   // a line in the log at the switch
-                            break;
                         case SettingsRow::WATCH_TEMP: break;   // a reading, not a switch
-                        case SettingsRow::WATCH_XTAL: twatchXtalStart(); break;
                         case SettingsRow::WATCH_SETTINGS: uiSettingsOpenPage(SettingsPage::WATCH); break;
+#if SQUACH_LORA
+                        case SettingsRow::WATCH_LORA:
+                            Settings::cycleLoraListen();
+                            Lora::applyListen(Settings::loraListen());
+                            Theme::showToast("LORA", Settings::loraListenName(), Theme::CYAN);
+                            break;
+                        case SettingsRow::WATCH_LORA_CHATS: enterLoraChat(); break;
+#endif
+                        case SettingsRow::WATCH_WARDRIVE:
+                            // Through the console's own path, so the row and
+                            // WARDRIVE ON/OFF can never disagree about what
+                            // switching it does (the GPS goes with it).
+                            g_consoleGps = Wardrive::enabled() ? 6 : 5;
+                            Theme::showToast(Wardrive::enabled() ? "WARDRIVE OFF" : "WARDRIVE ON",
+                                             Wardrive::enabled() ? nullptr : "Logging once the GPS has a fix",
+                                             Theme::CYAN);
+                            break;
                         case SettingsRow::WATCH_BUZZ:
                             // OFF, HIGH, MED, LOW. Each level plays the alert
                             // pattern once, so the choice is made by feel; OFF
@@ -6152,6 +6477,43 @@ void loop() {
             }
             break;
         }
+#if SQUACH_LORA
+        case AppState::LORA_CHAT: {
+            drawTwoBand([&](TFT_eSPI& t, bool) { uiLoraChatTick(t, now); });
+            static bool gestureActive = false;
+            static bool gestureMoved  = false;
+            static int  gestureStartX = 0, gestureStartY = 0;
+            static int  lastY = -1;
+            static uint32_t gestureDownMs = 0;
+            if (touchJustDown) {
+                gestureActive = true; gestureMoved = false;
+                gestureStartX = tp.x; gestureStartY = tp.y; lastY = tp.y; gestureDownMs = now;
+            }
+            if (tp.valid && gestureActive) {
+                const int dy = tp.y - lastY;
+                if (abs(dy) > 24) {
+                    gestureMoved = true;
+                    uiLoraChatScroll(dy > 0 ? -1 : 1);   // drag down: newer
+                    lastY = tp.y;
+                }
+            }
+            if (touchJustUp && gestureActive) {
+                gestureActive = false;
+                if (!gestureMoved && now - gestureDownMs <= TAP_MAX_MS) {
+                    lastTouch = now;
+                    if (Theme::pinnedBackHit(gestureStartX, gestureStartY, tft.width(), tft.height())) {
+                        enterSettings();
+                        uiSettingsOpenPage(SettingsPage::WATCH);
+                        break;
+                    }
+                    const LoraChatHit hit = uiLoraChatHit(*canvas, gestureStartX, gestureStartY);
+                    if (hit == LoraChatHit::TAB_MESHTASTIC) uiLoraChatSelect(0);
+                    else if (hit == LoraChatHit::TAB_MESHCORE) uiLoraChatSelect(1);
+                }
+            }
+            break;
+        }
+#endif
         case AppState::STATUS_LIGHT: {
             drawTwoBand([&](TFT_eSPI& t, bool) { uiLightTick(t, now, engine); });
             static bool gestureActive = false;
