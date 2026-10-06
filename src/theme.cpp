@@ -4470,9 +4470,10 @@ void drawToast(TFT_eSPI& t, uint32_t now) {
 
 #if defined(CYD35)
     const int w = t.width();
-    const int h = (t.height() == 160) ? 320 : t.height();
+    const int h = (t.height() < 480) ? 480 : t.height();
 #else
-    const int w = t.width(), h = t.height();
+    const int w = t.width();
+    const int h = (t.height() < 320) ? 320 : t.height();
 #endif
     t.setTextFont(1);
     t.setTextWrap(false);
